@@ -1,0 +1,17 @@
+# Copy to config.toml and fill in. See docs/OAUTH.md.
+
+[server]
+host = "127.0.0.1"
+port = 3000
+# openssl rand -hex 32
+secret_key = "CHANGE_ME"
+data_dir = "./data"          # bare mirror repos + sqlite live here
+public_origin = "http://localhost:5175"
+
+[providers.github]
+client_id = ""
+client_secret = ""
+
+# [providers.gitlab]
+# client_id = ""
+# client_secret = ""

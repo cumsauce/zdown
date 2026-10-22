@@ -1,0 +1,17 @@
+name: md_editor
+version: 0.1.0
+
+authors:
+  - lume
+
+targets:
+  md_editor:
+    main: src/md_editor.cr
+
+crystal: '>= 1.22.0'
+
+license: MIT
+
+dependencies:
+  git:
+    github: smacker/libgit2.cr
