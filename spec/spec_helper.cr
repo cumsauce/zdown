@@ -1,2 +1,5 @@
 require "spec"
-require "../src/md_editor"
+require "../src/config"
+require "../src/posts"
+require "../src/git"
+require "../src/security"

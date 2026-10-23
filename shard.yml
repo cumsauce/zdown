@@ -6,12 +6,19 @@ authors:
 
 targets:
   md_editor:
-    main: src/md_editor.cr
+    main: src/server.cr
 
 crystal: '>= 1.22.0'
 
 license: MIT
 
 dependencies:
-  git:
-    github: smacker/libgit2.cr
+  kemal:
+    github: kemalcr/kemal
+    version: ~> 1.15.0
+  sqlite3:
+    github: crystal-lang/crystal-sqlite3
+    version: ~> 0.21.0
+  toml:
+    github: crystal-community/toml.cr
+    branch: master
