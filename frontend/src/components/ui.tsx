@@ -5,6 +5,10 @@ import { tokens } from '../theme';
 
 // Shared chrome primitives — declared once, reused by every page.
 
+/** touch devices: bigger hit areas (see styles.css for baseui controls) */
+export const COARSE = '@media (pointer: coarse)';
+export const PHONE = '@media (max-width: 639px)';
+
 export const Page = styled('div', {
   maxWidth: '880px',
   margin: '0 auto',
@@ -75,6 +79,7 @@ export const MonoLink = styled(Link, {
   whiteSpace: 'nowrap',
   minWidth: 0,
   ':hover': { color: tokens.accent },
+  [COARSE]: { minHeight: '40px', display: 'flex', alignItems: 'center' },
 });
 
 /** Inline text action for status bars / forms. */
@@ -90,6 +95,7 @@ export const TextBtn = styled('button', {
   color: tokens.fgMuted,
   ':hover': { color: tokens.fg },
   ':disabled': { cursor: 'default', color: tokens.fgFaint },
+  [COARSE]: { minHeight: '40px', padding: '0 8px' },
 });
 
 export const Chip = styled('span', {

@@ -167,8 +167,11 @@ module MdEditor
     # must not exist yet". Returns new blob id. Raises Conflict on mismatch.
     class Conflict < Exception; end
 
+    # content = nil deletes the file (base_blob is then required: you can only
+    # delete the version you saw). Either way it's one more commit — history
+    # keeps the old content, so a delete is recoverable via restore.
     def commit_file(repo_id : Int64, branch : String, base_ref : String, path : String,
-                    content : String, base_blob : String?, message : String,
+                    content : String?, base_blob : String?, message : String,
                     author_name : String, author_email : String) : String
       cwd = mirror_path(repo_id)
 
@@ -180,6 +183,10 @@ module MdEditor
       current = run_status(["rev-parse", "--verify", "--quiet", "#{parent}:#{path}"], cwd: cwd) == 0 ?
         run(["rev-parse", "#{parent}:#{path}"], cwd: cwd).strip : nil
 
+      if content.nil?
+        raise Conflict.new("file does not exist") if current.nil?
+        raise Conflict.new("base_blob required to delete") if base_blob.nil?
+      end
       if base_blob.nil? && !current.nil?
         raise Conflict.new("file already exists (server blob #{current})")
       end
@@ -187,7 +194,7 @@ module MdEditor
         raise Conflict.new("changed on server: expected #{base_blob}, found #{current}")
       end
 
-      blob = write_blob(cwd, content)
+      blob = content ? write_blob(cwd, content) : nil
       tree = build_tree(cwd, parent, path, blob)
       commit = commit_tree(cwd, tree, parent, message, author_name, author_email)
       # Compare-and-swap on the ref: if another save moved the branch since
@@ -199,7 +206,7 @@ module MdEditor
       rescue e : Error
         raise Conflict.new("branch moved during save; reload and retry")
       end
-      blob
+      blob || ""
     end
 
     # Per-path history. Returns array of {sha, author, email, time, subject}.
@@ -244,7 +251,7 @@ module MdEditor
       run(["hash-object", "-w", "--stdin"], cwd: cwd, stdin: content).strip
     end
 
-    private def build_tree(cwd : String, parent : String, path : String, blob : String) : String
+    private def build_tree(cwd : String, parent : String, path : String, blob : String?) : String
       index = File.tempname("md_editor_index")
       begin
         env = {"GIT_INDEX_FILE" => index}
@@ -253,7 +260,13 @@ module MdEditor
           run(["mktree"], cwd: cwd, stdin: "", env: env).strip
         else
           run(["read-tree", parent_tree], cwd: cwd, env: env)
-          run(["update-index", "--add", "--cacheinfo", "100644,#{blob},#{path}"], cwd: cwd, env: env)
+          if blob
+            run(["update-index", "--add", "--cacheinfo", "100644,#{blob},#{path}"], cwd: cwd, env: env)
+          else
+            # mode 0 = remove the entry; --force-remove needs a work tree
+            run(["update-index", "--index-info"], cwd: cwd, env: env,
+              stdin: "0 #{"0" * 40}\t#{path}\n")
+          end
           run(["write-tree"], cwd: cwd, env: env).strip
         end
       ensure

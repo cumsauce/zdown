@@ -18,6 +18,7 @@ markdown blog editor with git-backed storage and local versioning.
 | Offline safety | Browser-side draft store + explicit sync protocol | IndexedDB draft per post, periodic save, dirty-state banner; sync never blind-overwrites: server compares HEAD and refuses/merges |
 | Zola awareness | Front matter + shortcode detection (M1), shortcode preview render (M2) | Parse `+++` TOML front matter; detect `{% %}` shortcodes and highlight/complete them |
 | Style | switchyard tokens | `#000` canvas, white type, 1px hairlines (`#262626`), zero radius, mono for code/status. Restrained preview type scale (no giant headers) |
+| Image CI | Actions multi-arch on **native runners**, per-arch digests merged into one manifest | QEMU-emulated static `--release` Crystal builds are unusably slow, so amd64/arm64 each build natively (amd64: `ubuntu-24.04`, arm64: `ubuntu-24.04-arm`) and push by digest; `merge` reassembles via `buildx imagetools create`. `main` ships `latest`/`sha-*`, `v*` git tags ship semver tags — keep tag = `shard.yml` version. Image: `ghcr.io/cumsauce/zdown` |
 
 ## Data flow
 

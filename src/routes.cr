@@ -471,6 +471,30 @@ module MdEditor
         raise ApiError.new(502, "git failed: #{e.message}")
       end
 
+      # Delete = a commit removing the file on the working branch (recoverable
+      # from history; nothing reaches the remote until publish).
+      delete "/api/repos/:repo_id/post" do |env|
+        uid = require_user(env)
+        repo = repo_owned(env, uid)
+        path = env.params.query["path"]?
+        base_blob = env.params.query["base_blob"]?
+        raise ApiError.new(400, "path and base_blob required") unless path && base_blob
+        raise ApiError.new(400, "invalid path (relative .md path, no .. or .git)") unless Git.valid_path?(path)
+        raise ApiError.new(400, "bad base_blob") unless base_blob.matches?(/^[0-9a-f]{40,64}$/)
+
+        login, name = MdEditor.db.query_one("SELECT login, name FROM users WHERE id = ?",
+          uid, as: {String, String?})
+        branch = user_branch(repo)
+        author_email = local?(repo) ? "#{login}@local" : "#{login}@users.noreply.#{repo[:provider]}.com"
+        Git.commit_file(repo[:id], branch, Git.working_ref(repo[:id], branch), path, nil,
+          base_blob, "Delete #{path}", name.presence || login, author_email)
+        json_response(env, 200, {ok: true}.to_json)
+      rescue e : Git::Conflict
+        raise ApiError.new(409, "conflict: #{e.message}")
+      rescue e : Git::Error
+        raise ApiError.new(502, "git failed: #{e.message}")
+      end
+
       get "/api/repos/:repo_id/post/versions" do |env|
         uid = require_user(env)
         repo = repo_owned(env, uid)

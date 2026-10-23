@@ -4,6 +4,8 @@ import { Select, type Value } from 'baseui/select';
 import { Spinner } from 'baseui/spinner';
 import { api, providerLabel, ApiError, type AvailableRepo, type Repo } from '../api';
 import { useAuth } from '../auth';
+import { useShell } from '../components/AppShell';
+import { recents } from '../lib/recents';
 import { notifyError, notifyOk } from '../notify';
 import { tokens } from '../theme';
 import { Card, Chip, Full, Grid2, Hint, ListRow, MonoLink, Page, PageHeader, Row, TextInput } from '../components/ui';
@@ -19,7 +21,7 @@ function RepoRow({ repo, onRemoved }: { repo: Repo; onRemoved: () => void }) {
   };
   const remove = async () => {
     if (!window.confirm(`remove ${repo.full_name}?\nthe local mirror and unpublished edits are deleted.`)) return;
-    try { await api.removeRepo(repo.id); onRemoved(); }
+    try { await api.removeRepo(repo.id); recents.dropRepo(repo.id); onRemoved(); }
     catch (e) { notifyError(e); }
   };
   return (
@@ -44,9 +46,11 @@ export function Repos() {
   const [scratch, setScratch] = useState('');
   const [busy, setBusy] = useState(false);
 
+  const { reloadRepos } = useShell();
   const load = useCallback(() => {
     api.repos().then(setRepos, notifyError);
-  }, []);
+    reloadRepos();
+  }, [reloadRepos]);
   const loadAvailable = useCallback(() => {
     if (!me) return;
     api.available(me.provider).then(setAvailable, (e) => setAvailErr(e instanceof ApiError ? e.message : String(e)));
@@ -76,10 +80,10 @@ export function Repos() {
 
   return (
     <Page>
-      <PageHeader title="Repositories"
-        meta={<Hint>{repos ? `${repos.length} ${repos.length === 1 ? 'repository' : 'repositories'}` : 'loading…'} · every save is a git commit</Hint>} />
+      <PageHeader title="Projects"
+        meta={<Hint>{repos ? `${repos.length} ${repos.length === 1 ? 'project' : 'projects'}` : 'loading…'} · every save is a git commit</Hint>} />
 
-      <Card title="Your repositories" flush>
+      <Card title="Your projects" flush>
         {repos === null ? (
           <div style={{ padding: 16 }}><Spinner $size="16px" /></div>
         ) : repos.length === 0 ? (
@@ -90,7 +94,7 @@ export function Repos() {
       </Card>
 
       <Grid2>
-        <Card title="Start writing">
+        <Card title="New scratchpad">
           <Hint>a local scratchpad — just markdown files, no repository required. connect it to {me ? providerLabel(me.provider) : 'a provider'} later to publish.</Hint>
           <Row>
             <Full>

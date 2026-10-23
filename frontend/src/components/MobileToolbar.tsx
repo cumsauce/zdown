@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { styled } from 'baseui';
+import { BLOCK, HEADINGS, INLINE, type Act } from './formatActions';
 import type { CodeMirrorHandle } from './CodeMirror';
 import { tokens } from '../theme';
 
@@ -13,6 +14,7 @@ const Bar = styled('div', {
     display: 'flex',
     alignItems: 'stretch',
     height: '44px',
+    boxSizing: 'content-box',
     borderTop: `1px solid ${tokens.border}`,
     backgroundColor: tokens.codeBg,
     flexShrink: 0,
@@ -37,7 +39,7 @@ const Key = styled<'button', { $on?: boolean }>('button', ({ $on }) => ({
   margin: 0,
   padding: '0 6px',
   minWidth: '40px',
-  height: '36px',
+  height: '44px',
   flexShrink: 0,
   cursor: 'pointer',
   fontFamily: tokens.mono,
@@ -49,30 +51,11 @@ const Key = styled<'button', { $on?: boolean }>('button', ({ $on }) => ({
   ':disabled': { color: tokens.fgFaint },
 }));
 
+const SelLabel = styled('span', { fontFamily: tokens.mono, fontSize: '11px', color: tokens.accent, padding: '0 6px 0 8px', flexShrink: 0 });
+
 const Sep = styled('span', { width: '1px', height: '20px', backgroundColor: tokens.border, margin: '0 4px', flexShrink: 0 });
 
-type Act = { label: React.ReactNode; aria: string; run(e: CodeMirrorHandle): void };
-
-const HEADINGS: Act[] = [1, 2, 3, 4, 5, 6].map((n) => ({
-  label: `H${n}`,
-  aria: `heading ${n}`,
-  run: (e) => e.linePrefix(`${'#'.repeat(n)} `),
-}));
-const INLINE: Act[] = [
-  { label: <b>B</b>, aria: 'bold', run: (e) => e.insert('**', '**') },
-  { label: <i>I</i>, aria: 'italic', run: (e) => e.insert('*', '*') },
-  { label: <s>S</s>, aria: 'strikethrough', run: (e) => e.insert('~~', '~~') },
-  { label: '`', aria: 'inline code', run: (e) => e.insert('`', '`') },
-  { label: '[ ]( )', aria: 'link', run: (e) => e.insert('[', '](https://)') },
-];
-const BLOCK: Act[] = [
-  { label: '❝', aria: 'quote', run: (e) => e.linePrefix('> ') },
-  { label: '•', aria: 'list', run: (e) => e.linePrefix('- ') },
-  { label: '1.', aria: 'numbered list', run: (e) => e.linePrefix('1. ') },
-  { label: '```', aria: 'code block', run: (e) => e.insert('```\n', '\n```') },
-];
-
-export function MobileToolbar({ editor }: { editor: React.RefObject<CodeMirrorHandle> }) {
+export function MobileToolbar({ editor, selecting = false }: { editor: React.RefObject<CodeMirrorHandle>; selecting?: boolean }) {
   const [moreH, setMoreH] = useState(false);
   const key = (a: Act) => (
     <Key key={a.aria} aria-label={a.aria} title={a.aria}
@@ -85,12 +68,20 @@ export function MobileToolbar({ editor }: { editor: React.RefObject<CodeMirrorHa
   return (
     <Bar role="toolbar" aria-label="formatting">
       <Scroll>
+        {selecting && (
+          // text selected: lead with what applies to a selection (the
+          // phone's equivalent of the desktop popover)
+          <>
+            <SelLabel>format</SelLabel>
+            {INLINE.map(key)}
+            <Sep />
+          </>
+        )}
         {HEADINGS.slice(0, moreH ? 6 : 3).map(key)}
         <Key $on={moreH} aria-label="more headings" aria-pressed={moreH}
           onMouseDown={(e) => e.preventDefault()} onClick={() => setMoreH(!moreH)}>{moreH ? '‹' : 'H…'}</Key>
         <Sep />
-        {INLINE.map(key)}
-        <Sep />
+        {!selecting && <>{INLINE.map(key)}<Sep /></>}
         {BLOCK.map(key)}
         <Sep />
         {key({ label: '↶', aria: 'undo', run: (e) => e.undo() })}

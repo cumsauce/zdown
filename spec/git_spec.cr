@@ -45,6 +45,21 @@ describe MdEditor::Git do
     JSON.parse(json)["front_matter"]["title"].as_s.should eq("Hello")
   end
 
+  it "deletes a file as a recoverable commit, only from the version seen" do
+    b = MdEditor::Git.commit_file(repo_id, "del-user", "main", "doomed.md",
+      "bye", nil, "add", "Spec", "spec@test")
+    expect_raises(MdEditor::Git::Conflict) do
+      MdEditor::Git.commit_file(repo_id, "del-user", "del-user", "doomed.md",
+        nil, "0" * 40, "stale delete", "Spec", "spec@test")
+    end
+    MdEditor::Git.commit_file(repo_id, "del-user", "del-user", "doomed.md",
+      nil, b, "Delete doomed.md", "Spec", "spec@test")
+    MdEditor::Git.file_blob(repo_id, "del-user", "doomed.md").should be_nil
+    MdEditor::Git.list_markdown(repo_id, "del-user").map(&.[1]).should contain("hello.md")
+    # still in history
+    MdEditor::Git.content_at(repo_id, "del-user~1", "doomed.md").should eq("bye")
+  end
+
   it "runs the full save/conflict lifecycle" do
     # 1. create new file on a fresh branch (base_blob nil) → new blob
     blob0 = MdEditor::Git.commit_file(repo_id, "spec-user", "main", "new.md",

@@ -61,6 +61,8 @@ export const api = {
   post: (id: number, path: string) => req<Post>('GET', `/api/repos/${id}/post?${q({ path })}`),
   save: (id: number, body: { path: string; content: string; base_blob?: string | null; message?: string }) =>
     req<SaveResult>('POST', `/api/repos/${id}/post/content`, body),
+  deleteFile: (id: number, path: string, base_blob: string) =>
+    req<{ ok: boolean }>('DELETE', `/api/repos/${id}/post?${q({ path, base_blob })}`),
   versions: (id: number, path: string) => req<Version[]>('GET', `/api/repos/${id}/post/versions?${q({ path })}`),
   contentAt: (id: number, sha: string, path: string) =>
     req<{ content: string }>('GET', `/api/repos/${id}/post/content_at?${q({ sha, path })}`),

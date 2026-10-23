@@ -21,6 +21,8 @@ export const tokens = {
   positive: '#4ade80',
   hover: '#0a0a0a',
   active: '#1f1f1f',
+  /** text selection: accent-tinted so it reads on black */
+  selection: '#1e4a63',
   codeBg: '#0d0d0d',
   serif: '"Newsreader", Georgia, serif',
   mono: 'ui-monospace, "SF Mono", Menlo, monospace',

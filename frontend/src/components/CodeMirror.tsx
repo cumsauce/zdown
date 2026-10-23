@@ -26,6 +26,7 @@ const C = {
   accentWash: '#060d12',
   hover: '#0a0a0a',
   active: '#1f1f1f',
+  selection: '#1e4a63',
   codeBg: '#0d0d0d',
   serif: '"Newsreader", Georgia, serif',
   mono: 'ui-monospace, "SF Mono", Menlo, monospace',
@@ -48,7 +49,8 @@ const editorTheme = EditorView.theme(
     '.cm-line': { padding: '0' },
     '.cm-cursor, .cm-dropCursor': { borderLeftColor: C.accent, borderLeftWidth: '2px' },
     '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, ::selection':
-      { backgroundColor: `${C.active} !important` },
+      { backgroundColor: `${C.selection} !important` },
+    '.cm-content ::selection': { color: C.fg },
     '.cm-activeLine': { backgroundColor: 'transparent' },
     '.cm-placeholder': { color: C.fgFaint },
 
@@ -229,12 +231,62 @@ const livePlugin = (showMarks: boolean) =>
     { decorations: (v) => v.decorations },
   );
 
+/** Where the (main) selection is, in viewport coordinates; null = empty/unfocused. */
+export interface SelectionBox { top: number; bottom: number; left: number; right: number }
+
+/** Wrap the selection in `m`, or unwrap it if it's already wrapped. */
+function toggleWrap(v: EditorView, m: string): boolean {
+  const { state } = v;
+  v.dispatch(
+    state.changeByRange((r) => {
+      const sel = state.sliceDoc(r.from, r.to);
+      const n = m.length;
+      // markers just outside the selection: **[bold]**
+      // (for `*`, don't eat half of a surrounding `**`)
+      const lone = m !== '*' || (state.sliceDoc(r.from - 2, r.from - 1) !== '*' && state.sliceDoc(r.to + 1, r.to + 2) !== '*');
+      if (lone && state.sliceDoc(r.from - n, r.from) === m && state.sliceDoc(r.to, r.to + n) === m) {
+        return {
+          changes: [{ from: r.from - n, to: r.from }, { from: r.to, to: r.to + n }],
+          range: EditorSelection.range(r.from - n, r.to - n),
+        };
+      }
+      // markers inside the selection: [**bold**]
+      if (sel.length >= 2 * n && sel.startsWith(m) && sel.endsWith(m)) {
+        return {
+          changes: { from: r.from, to: r.to, insert: sel.slice(n, -n) },
+          range: EditorSelection.range(r.from, r.to - 2 * n),
+        };
+      }
+      const anchor = r.from + n;
+      return {
+        changes: { from: r.from, to: r.to, insert: m + sel + m },
+        range: sel ? EditorSelection.range(anchor, anchor + sel.length) : EditorSelection.cursor(anchor),
+      };
+    }),
+  );
+  v.focus();
+  return true;
+}
+
+function insertLink(v: EditorView): boolean {
+  const r = v.state.selection.main;
+  const sel = v.state.sliceDoc(r.from, r.to);
+  const url = 'https://';
+  const at = r.from + sel.length + 3;
+  v.dispatch({ changes: { from: r.from, to: r.to, insert: `[${sel}](${url})` }, selection: { anchor: at, head: at + url.length } });
+  return true;
+}
+
 export interface CodeMirrorHandle {
   /** wrap the selection in before/after, or insert at the cursor */
   insert(before: string, after?: string): void;
+  /** like insert, but unwraps when the selection is already wrapped (B on bold = un-bold) */
+  toggleWrap(marker: string): void;
   /** toggle a line prefix ("## ", "> ", "- ") on every selected line */
   linePrefix(prefix: string): void;
   focus(): void;
+  /** focus with the cursor at the end of the document */
+  focusEnd(): void;
   undo(): void;
   redo(): void;
   /** drop focus — closes the on-screen keyboard */
@@ -250,17 +302,45 @@ interface Props {
   showMarks?: boolean;
   onSave?(): void;
   placeholderText?: string;
+  /** fires when a non-empty selection appears/moves/disappears */
+  onSelection?(box: SelectionBox | null): void;
 }
 
 export const CodeMirror = forwardRef<CodeMirrorHandle, Props>(function CodeMirror(
-  { value, onChange, wysiwyg = true, showMarks = true, onSave, placeholderText },
+  { value, onChange, wysiwyg = true, showMarks = true, onSave, placeholderText, onSelection },
   ref,
 ) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const live = useRef(new Compartment());
-  const cb = useRef({ onChange, onSave });
-  cb.current = { onChange, onSave };
+  const cb = useRef({ onChange, onSave, onSelection });
+  cb.current = { onChange, onSave, onSelection };
+
+  const lastBox = useRef<string>('null');
+  const reportSelection = (v: EditorView) => {
+    const sel = v.state.selection.main;
+    let box: SelectionBox | null = null;
+    if (!sel.empty && v.hasFocus) {
+      const a = v.coordsAtPos(sel.from);
+      const b = v.coordsAtPos(sel.to);
+      if (a && b) {
+        const sameLine = Math.abs(a.top - b.top) < 4;
+        const scroller = v.scrollDOM.getBoundingClientRect();
+        box = {
+          top: Math.max(a.top, scroller.top),
+          bottom: Math.min(b.bottom, scroller.bottom),
+          left: sameLine ? a.left : v.contentDOM.getBoundingClientRect().left,
+          right: sameLine ? b.right : v.contentDOM.getBoundingClientRect().right,
+        };
+        // scrolled out of view entirely
+        if (a.bottom < scroller.top || b.top > scroller.bottom) box = null;
+      }
+    }
+    const key = JSON.stringify(box);
+    if (key === lastBox.current) return;
+    lastBox.current = key;
+    cb.current.onSelection?.(box);
+  };
 
   useEffect(() => {
     if (!host.current) return;
@@ -277,22 +357,36 @@ export const CodeMirror = forwardRef<CodeMirrorHandle, Props>(function CodeMirro
           EditorView.contentAttributes.of({ spellcheck: 'true', autocapitalize: 'sentences', 'aria-label': 'markdown editor' }),
           keymap.of([
             { key: 'Mod-s', preventDefault: true, run: () => { cb.current.onSave?.(); return true; } },
+            { key: 'Mod-b', preventDefault: true, run: (v) => toggleWrap(v, '**') },
+            { key: 'Mod-i', preventDefault: true, run: (v) => toggleWrap(v, '*') },
+            { key: 'Mod-e', preventDefault: true, run: (v) => toggleWrap(v, '`') },
+            { key: 'Mod-k', preventDefault: true, run: insertLink },
             ...markdownKeymap,
             ...defaultKeymap,
             ...historyKeymap,
             indentWithTab,
           ]),
           live.current.of(wysiwyg ? livePlugin(showMarks) : []),
-          EditorView.updateListener.of((u) => { if (u.docChanged) cb.current.onChange(u.state.doc.toString()); }),
+          EditorView.updateListener.of((u) => {
+            if (u.docChanged) cb.current.onChange(u.state.doc.toString());
+            if (u.selectionSet || u.focusChanged || u.geometryChanged || u.docChanged) reportSelection(u.view);
+          }),
         ],
       }),
     });
     view.current = v;
+    const onScroll = () => reportSelection(v);
+    v.scrollDOM.addEventListener('scroll', onScroll, { passive: true });
     const mq = window.matchMedia('(max-width: 639px)');
     const sync = () => host.current?.classList.toggle('cm-md-mobile', mq.matches);
     sync();
     mq.addEventListener('change', sync);
-    return () => { mq.removeEventListener('change', sync); v.destroy(); view.current = null; };
+    return () => {
+      mq.removeEventListener('change', sync);
+      v.scrollDOM.removeEventListener('scroll', onScroll);
+      v.destroy();
+      view.current = null;
+    };
     // the editor is created once; value/props flow in through the effects below
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -329,6 +423,7 @@ export const CodeMirror = forwardRef<CodeMirrorHandle, Props>(function CodeMirro
       );
       v.focus();
     },
+    toggleWrap(m) { if (view.current) toggleWrap(view.current, m); },
     linePrefix(prefix) {
       const v = view.current;
       if (!v) return;
@@ -350,6 +445,13 @@ export const CodeMirror = forwardRef<CodeMirrorHandle, Props>(function CodeMirro
       v.focus();
     },
     focus() { view.current?.focus(); },
+    focusEnd() {
+      const v = view.current;
+      if (!v) return;
+      const end = v.state.doc.length;
+      v.dispatch({ selection: { anchor: end }, scrollIntoView: true });
+      v.focus();
+    },
     undo() { if (view.current) undo(view.current); },
     redo() { if (view.current) redo(view.current); },
     blur() { view.current?.contentDOM.blur(); },

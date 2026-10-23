@@ -42,8 +42,8 @@ with sync_playwright() as p:
     page.wait_for_url("**/repos/1")
     page.wait_for_timeout(600)
     step("posts listed", page.locator("text=Hello, Zola").count() > 0)
-    step("broken front matter flagged", page.locator("text=(untitled)").count() > 0)
-    step("shortcode badges", page.locator("text=youtube").count() > 0)
+    step("broken front matter flagged", page.locator("text=no front matter").count() > 0)
+    step("grouped by folder", page.locator("text=content/blog/").count() > 0)
     page.screenshot(path=f"{SHOT}/02-posts.png", full_page=True)
 
     # --- editor ---
@@ -53,14 +53,27 @@ with sync_playwright() as p:
     step("editor opened", "shortcodes.md" in page.url, page.url)
     body = page.inner_text("body")
     step("editor shows front matter", 'title = "Shortcodes & friends"' in body)
+    # CSP blocks wait_for_function (eval); poll the URL instead
+    def wait_path(pred, tries=100):
+        for _ in range(tries):
+            if pred(page.url.split("?")[0]): return
+            page.wait_for_timeout(150)
+        raise TimeoutError(page.url)
+
+    # secondary editor actions live in the ⋯ menu
+    def menu(label):
+        page.get_by_label("more actions").first.click()
+        page.wait_for_timeout(200)
+        page.get_by_role("option", name=label).first.click()
+
     # the editor opens on the writing view; toggle the marks affordance off+on
-    page.get_by_role("button", name="marks", exact=True).first.click()
+    menu("Hide markdown marks")
     page.wait_for_timeout(600)
     step("clean mode keeps prose text", page.locator("text=Careful with this one.").count() > 0)
     page.screenshot(path=f"{SHOT}/03-editor.png", full_page=True)
 
     # --- edit + save ---
-    page.get_by_role("button", name="marks", exact=True).first.click()
+    menu("Show markdown marks")
     page.wait_for_timeout(400)
     editor = page.locator(".cm-content").first
     step("codemirror present", editor.count() > 0)
@@ -76,12 +89,12 @@ with sync_playwright() as p:
     page.screenshot(path=f"{SHOT}/04-saved.png", full_page=True)
 
     # --- reload keeps the saved text ---
-    page.get_by_label("reload from server").first.click()
+    menu("Reload from server")
     page.wait_for_timeout(1200)
     step("reload shows saved text", "Edited in browser" in page.inner_text("body"))
 
     # --- history ---
-    page.get_by_role("button", name="history").first.click()
+    menu("Version history")
     page.wait_for_timeout(1200)
     step("versions page", "/versions" in page.url, page.url)
     step("commit listed", page.locator("text=Update content/blog/shortcodes.md").count() > 0)
@@ -117,24 +130,23 @@ with sync_playwright() as p:
     page.goto(f"{BASE}/repos")
     page.wait_for_load_state("networkidle")
     page.fill('input[placeholder="my-notes"]', "scratchpad")
-    page.click("text=start writing")
     page.get_by_role("button", name="create", exact=True).click()
     page.wait_for_timeout(800)
     step("local repo created", page.locator("a:has-text('scratchpad')").count() > 0)
     page.screenshot(path=f"{SHOT}/08-local-created.png", full_page=True)
 
-    page.click("a:has-text('scratchpad')")
+    page.locator("main a:has-text('scratchpad')").first.click()
     # client-side routing: no new 'load' event, so wait_for_url would hang
-    page.wait_for_function("location.pathname === '/repos/2'")
+    wait_path(lambda p: p.endswith("/repos/2"))
     page.wait_for_timeout(800)
     step("local repo lists seeded post", page.locator("text=README.md").count() > 0)
     step("local hides sync/publish", page.locator('button:has-text("publish")').count() == 0)
     step("local shows connect panel", "connect to a repository" in page.inner_text("body").lower())
     page.screenshot(path=f"{SHOT}/09-local-posts.png", full_page=True)
 
-    page.fill('input[placeholder="content/blog/my-new-post.md"]', "ideas.md")
+    page.fill('#new-post', "ideas.md")
     page.click("text=new post")
-    page.wait_for_function("location.pathname.includes('/edit')")
+    wait_path(lambda p: "/edit" in p)
     page.wait_for_timeout(800)
     editor = page.locator(".cm-content").first
     editor.click()
@@ -144,7 +156,7 @@ with sync_playwright() as p:
     page.wait_for_timeout(1500)
     step("local save committed", page.locator("[title='saved']").count() > 0)
 
-    page.get_by_role("button", name="history").first.click()
+    menu("Version history")
     page.wait_for_timeout(1200)
     step("local history works", page.locator("text=Create ideas.md").count() > 0)
 

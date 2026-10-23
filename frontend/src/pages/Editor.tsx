@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { styled } from 'baseui';
 import { Button, KIND, SIZE } from 'baseui/button';
 import { Spinner } from 'baseui/spinner';
 import { api, ApiError, errorMessage, type Repo } from '../api';
-import { CodeMirror, type CodeMirrorHandle } from '../components/CodeMirror';
+import { CodeMirror, type CodeMirrorHandle, type SelectionBox } from '../components/CodeMirror';
+import { FormatPopover } from '../components/FormatPopover';
 import { FrontMatterSheet } from '../components/FrontMatterSheet';
 import { MobileToolbar } from '../components/MobileToolbar';
 import { Preview } from '../components/Preview';
-import { Banner, Center, ErrorText, Full, Seg, SegBtn } from '../components/ui';
+import { NavButton } from '../components/AppShell';
+import { recents } from '../lib/recents';
+import { Banner, Center, ErrorText, Full } from '../components/ui';
 import { StatefulPopover, PLACEMENT } from 'baseui/popover';
 import { StatefulMenu } from 'baseui/menu';
 import { drafts, type Draft } from '../lib/drafts';
@@ -17,8 +20,10 @@ import { clock } from '../lib/time';
 import { notifyError, notifyOk } from '../notify';
 import { tokens } from '../theme';
 
-// Wide = everything inline (Ghost/Ulysses-style toolbar). Below that the
-// header collapses to title · status · preview · save · ⋯ (iA Writer/Bear).
+// One header at every size (iA Writer/Bear): title · state · ⚙ · preview ·
+// save · ⋯. Secondary actions live in the ⋯ menu. WIDE only decides
+// whether post settings dock beside the text or cover it.
+const NotPhone = styled('span', { display: 'contents', '@media (max-width: 639px)': { display: 'none' } });
 const WIDE = '@media (min-width: 1100px)';
 const COMPACT = '@media (max-width: 1099px)';
 const PHONE = '@media (max-width: 639px)';
@@ -27,7 +32,7 @@ const PHONE = '@media (max-width: 639px)';
 // on-screen keyboard on iOS/Android instead of hiding behind it.
 const Shell = styled('div', {
   position: 'fixed',
-  left: 0,
+  left: 'var(--nav-w, 0px)',
   right: 0,
   display: 'flex',
   flexDirection: 'column',
@@ -37,7 +42,7 @@ const Shell = styled('div', {
 
 const Bar = styled('header', {
   height: '48px',
-  padding: '0 12px 0 8px',
+  padding: '0 12px',
   display: 'flex',
   alignItems: 'center',
   gap: '8px',
@@ -46,18 +51,6 @@ const Bar = styled('header', {
   minWidth: 0,
   '& button': { whiteSpace: 'nowrap', flexShrink: 0 },
   [PHONE]: { padding: '0 4px', gap: '4px' },
-});
-
-const Back = styled(Link, {
-  fontSize: '17px',
-  lineHeight: 1,
-  color: tokens.fgMuted,
-  width: '32px',
-  height: '32px',
-  display: 'grid',
-  placeItems: 'center',
-  flexShrink: 0,
-  ':hover': { color: tokens.fg, backgroundColor: tokens.hover },
 });
 
 const TitleBlock = styled('div', { display: 'flex', flexDirection: 'column', minWidth: 0, flex: '0 1 auto' });
@@ -102,8 +95,6 @@ const DirtyDot = styled<'span', { $saved: boolean }>('span', ({ $saved }) => ({
 
 const StateLabel = styled('span', { [PHONE]: { display: 'none' } });
 
-const Wide = styled('span', { display: 'contents', [COMPACT]: { display: 'none' } });
-const Compact = styled('span', { display: 'contents', [WIDE]: { display: 'none' } });
 
 const Status = styled('footer', {
   display: 'flex',
@@ -118,7 +109,6 @@ const Status = styled('footer', {
   [PHONE]: { display: 'none' },
 });
 
-const Divider = styled('span', { width: '1px', height: '16px', backgroundColor: tokens.border, margin: '0 4px', flexShrink: 0 });
 
 const Body = styled('div', { flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden', position: 'relative' });
 
@@ -209,6 +199,12 @@ export function Editor() {
   const inflight = useRef<Promise<void> | null>(null);
   const again = useRef(false);
   const userEdited = useRef(false);
+  const [selBox, setSelBox] = useState<SelectionBox | null>(null);
+  const finePointer = useMemo(() => window.matchMedia('(pointer: fine)').matches, []);
+  // Handoff from the Home composer: text typed after the file was created
+  // (`pending`) and a request to continue typing at the end.
+  const handoff = useLocation().state as { pending?: string; focusEnd?: boolean } | null;
+  const handoffRef = useRef(handoff);
 
   // ---------- load ----------
   const fetchServer = useCallback(async () => {
@@ -240,6 +236,8 @@ export function Editor() {
         } else {
           setContent(committed);
         }
+        const pending = handoffRef.current?.pending;
+        if (pending != null && pending !== committed) { userEdited.current = true; setContent(pending); }
         setLoadError(null);
       } catch (e) {
         if (!cancelled) setLoadError(errorMessage(e));
@@ -249,6 +247,12 @@ export function Editor() {
     })();
     return () => { cancelled = true; };
   }, [repoId, path, fetchServer]);
+
+  useEffect(() => {
+    if (loading || !handoffRef.current?.focusEnd) return;
+    handoffRef.current = null;
+    requestAnimationFrame(() => editor.current?.focusEnd());
+  }, [loading]);
 
   // ---------- drafts (debounced, only while dirty) ----------
   useEffect(() => {
@@ -386,18 +390,35 @@ export function Editor() {
     return typeof t === 'string' && t.trim() ? t : null;
   }, [content]);
   const vp = useVisualViewport();
+  useEffect(() => { if (!loading && !loadError) recents.touch(repoId, path, docTitle); }, [repoId, path, loading, loadError]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!loading) recents.retitle(repoId, path, docTitle); }, [docTitle, loading, repoId, path]);
   const local = repo?.provider === 'local';
 
   const basename = path.split('/').pop() ?? path;
+  const deleteFile = async () => {
+    const committed = server !== null && baseBlob;
+    const msg = committed
+      ? `Delete ${path}?\n\nIt's removed in a new commit — still in version history, and nothing changes on the remote until you publish.`
+      : `Discard ${path}? It was never saved.`;
+    if (!window.confirm(msg)) return;
+    try {
+      if (committed) await api.deleteFile(repoId, path, baseBlob);
+      userEdited.current = false;
+      await drafts.clear(repoId, path);
+      recents.remove(repoId, path);
+      notifyOk(`deleted ${basename}`);
+      navigate(`/repos/${repoId}`, { replace: true });
+    } catch (e) { notifyError(e); }
+  };
   const openHistory = () => navigate(`/repos/${repoId}/versions?path=${encodeURIComponent(path)}`);
   const stateText = conflict ? 'conflict' : saving ? 'saving…' : dirty ? (server === null ? 'new · modified' : 'modified')
     : savedAt ? `saved ${clock(savedAt)}` : 'saved';
   const menuItems = [
-    { label: 'Post settings', run: () => setSheet(true) },
     { label: marks ? 'Hide markdown marks' : 'Show markdown marks', run: () => setMarks(!marks) },
     { label: 'Version history', run: openHistory },
     { label: 'Reload from server', run: () => void reload() },
     ...(repo && !local ? [{ label: 'Publish', run: () => void publish() }] : []),
+    { label: <span style={{ color: tokens.negative }}>Delete file…</span>, run: () => void deleteFile() },
     { label: `${words} words`, disabled: true, run: () => {} },
   ];
 
@@ -407,7 +428,7 @@ export function Editor() {
   return (
     <Shell style={{ top: vp.top, height: vp.height }}>
       <Bar>
-        <Back to={`/repos/${repoId}`} aria-label="back to posts">‹</Back>
+        <NavButton />
         <TitleBlock title={path}>
           <DocTitle>{docTitle ?? basename}</DocTitle>
           <DocPath>{path}</DocPath>
@@ -417,34 +438,16 @@ export function Editor() {
           <StateLabel style={{ color: conflict ? tokens.negative : undefined }}>{stateText}</StateLabel>
         </SaveState>
         <Full />
-        <Wide>
-          <Seg role="group" aria-label="view">
-            <SegBtn $active={tab === 'write'} aria-pressed={tab === 'write'} onClick={() => setTab('write')}>write</SegBtn>
-            <SegBtn $active={tab === 'preview'} aria-pressed={tab === 'preview'} onClick={() => setTab('preview')}>preview</SegBtn>
-          </Seg>
-          <Seg role="group" aria-label="markdown markers">
-            <SegBtn $active={marks} aria-pressed={marks} onClick={() => setMarks(true)}
-              title="show markdown markers (#, **)">marks</SegBtn>
-            <SegBtn $active={!marks} aria-pressed={!marks} onClick={() => setMarks(false)}
-              title="hide markers off the cursor line">clean</SegBtn>
-          </Seg>
-          <Divider />
-          <Button size={SIZE.mini} kind={KIND.tertiary} aria-label="settings" aria-expanded={sheet} onClick={() => setSheet(!sheet)}>⚙ settings</Button>
-          <Button size={SIZE.mini} kind={KIND.tertiary} onClick={openHistory}>history</Button>
-          <Button size={SIZE.mini} kind={KIND.tertiary} aria-label="reload from server" onClick={() => void reload()}>↻</Button>
-          <Divider />
-          {repo && !local && (
-            <Button size={SIZE.mini} kind={KIND.secondary} isLoading={publishing} onClick={() => void publish()}>publish</Button>
-          )}
-        </Wide>
-        <Compact>
-          <Button size={SIZE.mini} kind={KIND.tertiary} aria-pressed={tab === 'preview'}
+        <Button size={SIZE.mini} kind={KIND.tertiary} aria-label="post settings" aria-expanded={sheet}
+          title="post settings" onClick={() => setSheet(!sheet)}>⚙</Button>
+        <Button size={SIZE.mini} kind={KIND.tertiary} aria-pressed={tab === 'preview'}
             onClick={() => setTab(tab === 'write' ? 'preview' : 'write')}>{tab === 'write' ? 'preview' : 'edit'}</Button>
-        </Compact>
+        {repo && !local && !dirty && (
+          <NotPhone><Button size={SIZE.mini} kind={KIND.secondary} isLoading={publishing} onClick={() => void publish()}>publish</Button></NotPhone>
+        )}
         <Button size={SIZE.mini} kind={dirty ? KIND.primary : KIND.tertiary} isLoading={saving}
           disabled={!dirty || conflict} onClick={() => void save()}>save</Button>
-        <Compact>
-          <StatefulPopover placement={PLACEMENT.bottomRight}
+        <StatefulPopover placement={PLACEMENT.bottomRight}
             content={({ close }) => (
               <StatefulMenu
                 items={menuItems}
@@ -456,8 +459,7 @@ export function Editor() {
               />
             )}>
             <Button size={SIZE.mini} kind={KIND.tertiary} aria-label="more actions">⋯</Button>
-          </StatefulPopover>
-        </Compact>
+        </StatefulPopover>
       </Bar>
 
       {conflict && (
@@ -492,7 +494,7 @@ export function Editor() {
 
       <Body>
         <div style={{ display: tab === 'write' ? 'flex' : 'none', flex: 1, minHeight: 0, minWidth: 0 }}>
-          <CodeMirror ref={editor} value={content} onChange={onChange} showMarks={marks} onSave={() => void save()} />
+          <CodeMirror ref={editor} value={content} onChange={onChange} showMarks={marks} onSave={() => void save()} onSelection={setSelBox} />
         </div>
         {tab === 'preview' && <div style={{ flex: 1, overflowY: 'auto', minWidth: 0 }}><Preview content={content} /></div>}
         {sheet && (
@@ -508,7 +510,8 @@ export function Editor() {
         )}
       </Body>
 
-      {tab === 'write' && !sheet && <MobileToolbar editor={editor} />}
+      {tab === 'write' && !sheet && <MobileToolbar editor={editor} selecting={!!selBox} />}
+      {tab === 'write' && selBox && finePointer && <FormatPopover box={selBox} editor={editor} />}
 
       <Status>
         <span>{words} words</span>

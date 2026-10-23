@@ -26,7 +26,7 @@ body {
   -webkit-text-size-adjust: 100%;
 }
 a { color: inherit; text-decoration: none; }
-::selection { background: #1f1f1f; }
+::selection { background: #1e4a63; color: #fff; }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: #262626; }
 ::-webkit-scrollbar-thumb:hover { background: #3a3a3a; }
@@ -82,3 +82,13 @@ a { color: inherit; text-decoration: none; }
 .cm-host .cm-editor { flex: 1; min-width: 0; }
 .cm-host.cm-md-mobile .cm-content { font-size: 16px; padding: 14px 12px 40vh; }
 @media (max-width: 639px) { .diff div { white-space: pre-wrap; overflow-wrap: anywhere; } }
+
+/* ---- touch accommodations (design-system rule: coarse pointers get 40px
+   targets and 16px form text; the desktop 28px/13px density stays as is) ---- */
+@media (pointer: coarse) {
+  [data-baseweb="button"] { min-height: 40px; min-width: 40px; }
+  /* iOS zooms the page when a focused field's text is under 16px */
+  input, textarea, select { font-size: 16px !important; }
+  [data-baseweb="input"], [data-baseweb="select"] > div { min-height: 40px; }
+  .touch-row { min-height: 44px; }
+}

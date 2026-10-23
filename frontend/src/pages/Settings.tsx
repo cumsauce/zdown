@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Button, KIND, SIZE } from 'baseui/button';
 import { api, providerLabel, type Repo } from '../api';
 import { useAuth } from '../auth';
-import { UserMark } from '../components/TopBar';
+import { UserMark } from '../components/UserMark';
 import { Card, Chip, Full, Hint, ListRow, MonoText, Page, PageHeader, Row } from '../components/ui';
 import { tokens } from '../theme';
 

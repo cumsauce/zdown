@@ -7,7 +7,8 @@ import { api, providerLabel, type PostSummary, type Repo } from '../api';
 import { useAuth } from '../auth';
 import { notifyError, notifyOk } from '../notify';
 import { tokens } from '../theme';
-import { Card, Chevron, Chip, ErrorText, Full, HideMobile, Hint, ListRow, MonoText, OnlyMobile, Page, PageHeader, Row, TextInput } from '../components/ui';
+import { editUrl } from '../lib/recents';
+import { Card, Chevron, Chip, ErrorText, Full, HideMobile, Hint, ListRow, MonoText, TextBtn, OnlyMobile, Page, PageHeader, Row, TextInput } from '../components/ui';
 
 const PostLink = styled(Link, {
   display: 'flex',
@@ -19,28 +20,76 @@ const PostLink = styled(Link, {
   '@media (max-width: 639px)': { padding: '12px' },
 });
 
-const Dot = styled<'span', { $ok: boolean }>('span', ({ $ok }) => ({
-  width: '6px',
-  height: '6px',
-  borderRadius: '50%',
-  flexShrink: 0,
-  backgroundColor: $ok ? tokens.borderStrong : tokens.warning,
-}));
+// Zola layout: a folder with `_index.md` is a *section* (that file is the
+// section's own page); a folder with `index.md` is a *page bundle* — one post
+// whose media sits beside it. Everything else is a plain post file.
+interface Entry { post: PostSummary; name: string; bundle: boolean }
+interface Group { dir: string; depth: number; section: PostSummary | null; entries: Entry[] }
 
-function PostRow({ repoId, post }: { repoId: number; post: PostSummary }) {
+const dirOf = (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
+const baseOf = (p: string) => p.slice(p.lastIndexOf('/') + 1);
+
+function groupPosts(posts: PostSummary[]): Group[] {
+  const groups = new Map<string, Group>();
+  const group = (dir: string) => {
+    let g = groups.get(dir);
+    if (!g) groups.set(dir, (g = { dir, depth: dir ? dir.split('/').length : 0, section: null, entries: [] }));
+    return g;
+  };
+  for (const post of posts) {
+    const dir = dirOf(post.path);
+    const base = baseOf(post.path);
+    if (base === '_index.md') { group(dir).section = post; continue; }
+    if (base === 'index.md' && dir) {
+      // a bundle is listed in its parent folder, named after its own folder
+      group(dirOf(dir)).entries.push({ post, name: baseOf(dir), bundle: true });
+      continue;
+    }
+    group(dir).entries.push({ post, name: base.replace(/\.(md|markdown)$/i, ''), bundle: false });
+  }
+  return [...groups.values()]
+    .filter((g) => g.section || g.entries.length)
+    .sort((a, b) => a.dir.localeCompare(b.dir));
+}
+
+const usesBundles = (g: Group) => g.entries.length > 0 && g.entries.filter((e) => e.bundle).length > g.entries.length / 2;
+
+const GroupHead = styled('div', {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '8px',
+  padding: '16px 16px 6px',
+  borderBottom: `1px solid ${tokens.rowRule}`,
+});
+
+const Warn = styled('span', {
+  fontFamily: tokens.mono,
+  fontSize: '11px',
+  color: tokens.warning,
+  border: `1px solid ${tokens.warning}`,
+  padding: '0 4px',
+  flexShrink: 0,
+});
+
+function PostRow({ repoId, entry, indent }: { repoId: number; entry: Entry; indent: number }) {
   const navigate = useNavigate();
-  const shortcodes = post.shortcodes.filter((s) => s !== 'end' && s !== 'else');
+  const { post } = entry;
   return (
     <ListRow style={{ padding: 0 }}>
-      <PostLink to={`/repos/${repoId}/edit?path=${encodeURIComponent(post.path)}`}>
-        <Dot $ok={post.valid_front_matter} title={post.valid_front_matter ? 'front matter ok' : 'no valid +++ front matter'} />
+      <PostLink to={editUrl(repoId, post.path)} style={{ paddingLeft: 16 + indent }} title={post.path}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
-          <span style={{ fontSize: 13, fontWeight: 500, color: post.valid_front_matter ? tokens.fg : tokens.warning }}>
-            {post.title ?? <span style={{ color: tokens.fgFaint, fontWeight: 400 }}>(untitled)</span>}
+          <span style={{ fontSize: 13, fontWeight: 500, color: tokens.fg, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {post.title ?? <span style={{ color: tokens.fgMuted, fontWeight: 400 }}>{entry.name}</span>}
           </span>
-          <MonoText style={{ fontSize: 11, color: tokens.fgMuted }}>{post.path}</MonoText>
-          {shortcodes.length > 0 && <Row style={{ gap: 4, marginTop: 4 }}>{shortcodes.map((s) => <Chip key={s}>{s}</Chip>)}</Row>}
+          <MonoText style={{ fontSize: 11, color: tokens.fgMuted }}>
+            {entry.bundle ? `${entry.name}/ · post folder` : baseOf(post.path)}
+          </MonoText>
         </div>
+        {!post.valid_front_matter && (
+          <Warn title="no valid +++ TOML front matter at the top of this file, so Zola may skip or fail on it — open it and use ⚙ post settings to add a title">
+            no front matter
+          </Warn>
+        )}
         <OnlyMobile><Chevron>›</Chevron></OnlyMobile>
       </PostLink>
       <HideMobile>
@@ -50,6 +99,39 @@ function PostRow({ repoId, post }: { repoId: number; post: PostSummary }) {
         </div>
       </HideMobile>
     </ListRow>
+  );
+}
+
+function PostGroups({ repoId, posts, onNew }: { repoId: number; posts: PostSummary[]; onNew: (path: string) => void }) {
+  const navigate = useNavigate();
+  const groups = groupPosts(posts);
+  const minDepth = Math.min(99, ...groups.filter((g) => g.dir).map((g) => g.depth));
+  return (
+    <>
+      {groups.map((g) => {
+        const indent = g.dir ? (g.depth - minDepth) * 16 : 0;
+        return (
+          <div key={g.dir}>
+            {(g.dir || g.section) && (
+              <GroupHead style={{ paddingLeft: 16 + indent }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: tokens.fgSoft, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {g.section?.title ?? (baseOf(g.dir) || 'site root')}
+                </span>
+                <Hint style={{ whiteSpace: 'nowrap' }}>{g.dir ? `${g.dir}/` : '/'}</Hint>
+                <Full />
+                {g.section && (
+                  <TextBtn style={{ flexShrink: 0 }} onClick={() => navigate(editUrl(repoId, g.section!.path))}
+                    title="edit this section's _index.md (its title, sorting, intro text)">section page</TextBtn>
+                )}
+                <TextBtn style={{ flexShrink: 0 }} title="new post in this folder"
+                  onClick={() => onNew(`${g.dir ? g.dir + '/' : ''}${usesBundles(g) ? 'my-post/index.md' : 'my-post.md'}`)}>+ new</TextBtn>
+              </GroupHead>
+            )}
+            {g.entries.map((e) => <PostRow key={e.post.path} repoId={repoId} entry={e} indent={indent} />)}
+          </div>
+        );
+      })}
+    </>
   );
 }
 
@@ -141,7 +223,6 @@ export function Posts() {
   return (
     <Page>
       <PageHeader
-        back={{ to: '/repos', label: 'repositories' }}
         title={short}
         meta={repo && <><MonoText style={{ fontSize: 11, color: tokens.fgMuted }}>{repo.full_name}</MonoText><Chip>{providerLabel(repo.provider)}</Chip></>}
         actions={repo && !local && (
@@ -163,7 +244,7 @@ export function Posts() {
         </div></>}>
         <Row style={{ padding: '12px 16px', borderBottom: `1px solid ${tokens.border}`, backgroundColor: tokens.hover, flexWrap: 'nowrap' }}>
           <Full>
-            <TextInput value={newPath} placeholder="content/blog/my-new-post.md"
+            <TextInput id="new-post" value={newPath} placeholder="new post path, e.g. content/blog/my-post.md"
               onChange={(e) => setNewPath(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === 'Enter') newPost(); }} />
           </Full>
           <Button size={SIZE.mini} kind={KIND.secondary} disabled={!newPath.trim()} onClick={newPost}>new post</Button>
@@ -173,7 +254,7 @@ export function Posts() {
         ) : shown.length === 0 ? (
           <div style={{ padding: 16 }}><Hint>no posts{filter ? ' match' : ' yet — create one above'}</Hint></div>
         ) : (
-          shown.map((p) => <PostRow key={p.path} repoId={repoId} post={p} />)
+          <PostGroups repoId={repoId} posts={shown} onNew={(p) => { setNewPath(p); const el = document.getElementById('new-post') as HTMLInputElement | null; el?.focus(); el?.select(); }} />
         )}
       </Card>
     </Page>
