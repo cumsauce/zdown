@@ -1,3 +1,4 @@
+require "base64"
 require "json"
 
 module MdEditor
@@ -12,6 +13,12 @@ module MdEditor
 
     def label : String
       "GitHub"
+    end
+
+    # GitHub's git-over-HTTPS rejects `Bearer`; it wants Basic with the token
+    # as the password (any username; x-access-token is the documented one).
+    def git_auth(access_token : String) : String
+      "Basic #{Base64.strict_encode("x-access-token:#{access_token}")}"
     end
 
     def authorize_url(state : String) : String

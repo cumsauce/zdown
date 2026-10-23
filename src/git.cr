@@ -11,7 +11,15 @@ module MdEditor
       getter stderr : String
 
       def initialize(@stderr : String, message : String? = nil)
-        super(message || "git failed: #{stderr.lines.first?}")
+        super(message || "git failed: #{Error.summary(stderr)}")
+      end
+
+      # git's first stderr line is usually progress ("Cloning into ...");
+      # the useful part is the fatal/error/remote lines.
+      def self.summary(stderr : String) : String
+        lines = stderr.lines.map(&.strip).reject(&.empty?)
+        useful = lines.select { |l| l.starts_with?("fatal:") || l.starts_with?("error:") || l.starts_with?("remote:") }
+        (useful.empty? ? lines.last(1) : useful.last(3)).join(" | ")
       end
     end
 
