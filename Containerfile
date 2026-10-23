@@ -2,7 +2,7 @@
 #   podman build -t localhost/md_editor:latest .
 
 # --- frontend stage ---
-FROM docker.io/library/node:22-alpine AS frontend
+FROM docker.io/library/node:24-alpine AS frontend
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
