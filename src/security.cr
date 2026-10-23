@@ -92,7 +92,7 @@ module MdEditor
       cipher.key = token_enc_key
       cipher.iv = iv
       cipher.gcm_tag = tag
-      (cipher.update(ct) + cipher.final).to_s
+      String.new(cipher.update(ct) + cipher.final)
     rescue
       nil
     end
