@@ -19,7 +19,7 @@ RUN apk add --no-cache \
 COPY shard.yml shard.lock ./
 RUN shards install --production
 COPY src/ src/
-RUN crystal build --release --static --no-debug src/server.cr -o bin/md_editor
+RUN mkdir -p bin && crystal build --release --static --no-debug src/server.cr -o bin/md_editor
 
 # --- runtime stage ---
 FROM docker.io/library/alpine:3.20
