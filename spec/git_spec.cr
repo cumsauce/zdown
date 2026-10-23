@@ -83,3 +83,58 @@ describe MdEditor::Git do
     diff.should contain("+v2")
   end
 end
+
+describe "MdEditor::Git data safety" do
+  root = "/tmp/md_editor_spec2"
+  env = {"GIT_AUTHOR_NAME" => "t", "GIT_AUTHOR_EMAIL" => "t@t", "GIT_COMMITTER_NAME" => "t", "GIT_COMMITTER_EMAIL" => "t@t"}
+
+  before_all do
+    FileUtils.rm_rf(root)
+    Dir.mkdir_p("#{root}/repos")
+    src = "#{root}/src"
+    Process.run("git", ["init", "-q", "-b", "main", src])
+    File.write("#{src}/a.md", "one\n")
+    Process.run("git", ["add", "."], chdir: src)
+    Process.run("git", ["commit", "-q", "-m", "init"], chdir: src, env: env)
+    Process.run("git", ["clone", "-q", "--mirror", src, "#{root}/repos/7.git"])
+    MdEditor::Git.override_repos_dir_for_tests("#{root}/repos")
+  end
+
+  after_all { FileUtils.rm_rf(root) }
+
+  it "keeps unpublished work branches across fetch --prune" do
+    MdEditor::Git.commit_file(7_i64, "site-user", "main", "a.md", "local edit\n",
+      MdEditor::Git.file_blob(7_i64, "main", "a.md"), "local", "t", "t@t")
+    # remote gains a same-named branch: must neither prune nor overwrite ours
+    Process.run("git", ["branch", "site-user"], chdir: "#{root}/src")
+    2.times do
+      MdEditor::Git.fetch_mirror(7_i64, "#{root}/src", "Bearer x")
+      MdEditor::Git.read_file(7_i64, "site-user", "a.md").should eq("local edit\n")
+      Process.run("git", ["branch", "-D", "site-user"], chdir: "#{root}/src")
+    end
+  end
+
+  it "still mirrors normal branches" do
+    File.write("#{root}/src/a.md", "two\n")
+    Process.run("git", ["commit", "-qam", "two"], chdir: "#{root}/src", env: env)
+    MdEditor::Git.fetch_mirror(7_i64, "#{root}/src", "Bearer x")
+    MdEditor::Git.read_file(7_i64, "main", "a.md").should eq("two\n")
+  end
+
+  it "refuses to create a branch a concurrent save already created" do
+    expect_raises(MdEditor::Git::Conflict) do
+      # base_ref given, but the branch exists → normal path; simulate the race by
+      # creating the branch between read and write via a stale create
+      MdEditor::Git.commit_file(7_i64, "race-user", "main", "b.md", "x", nil, "c1", "t", "t@t")
+      MdEditor::Git.commit_file(7_i64, "race-user", "main", "b.md", "y", nil, "c2", "t", "t@t")
+    end
+    MdEditor::Git.read_file(7_i64, "race-user", "b.md").should eq("x")
+  end
+
+  it "validates writable paths" do
+    %w[a.md content/blog/x.md notes.markdown].each { |p| MdEditor::Git.valid_path?(p).should be_true }
+    ["../a.md", "/etc/a.md", "a/../b.md", ".git/config.md", "a\nb.md", "x.toml", "a//b.md", "", "sub/.GIT/x.md"].each do |p|
+      MdEditor::Git.valid_path?(p).should be_false
+    end
+  end
+end

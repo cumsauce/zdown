@@ -1,0 +1,10 @@
+# never send local secrets, data or build junk into the build context
+config.toml
+data/
+bin/
+lib/
+.shards/
+public/
+frontend/node_modules/
+scripts/e2e/*.png
+.git/

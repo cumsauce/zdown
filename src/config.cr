@@ -26,6 +26,14 @@ module MdEditor
     getter github_client_secret : String?
     getter gitlab_client_id : String?
     getter gitlab_client_secret : String?
+    # gitlab.com by default; set for self-hosted GitLab.
+    getter gitlab_base_url : String
+    # Site gate: when set, every page/asset/API call needs the shared password
+    # first (skipped under dev_auto_login). Env MD_EDITOR_GATE_PASSWORD wins.
+    getter gate_password : String?
+    # Who may sign in, as "provider:login" (e.g. "github:lume"). Empty = anyone
+    # who can complete OAuth.
+    getter allowed_users : Array(String)
 
     def initialize(
       @host : String,
@@ -39,6 +47,9 @@ module MdEditor
       @github_client_secret : String?,
       @gitlab_client_id : String?,
       @gitlab_client_secret : String?,
+      @gitlab_base_url : String = "https://gitlab.com",
+      @gate_password : String? = nil,
+      @allowed_users : Array(String) = [] of String,
     )
     end
 
@@ -48,9 +59,14 @@ module MdEditor
       end
       t = TOML.parse_file(path)
 
-      secret = t.dig?("server", "secret_key").try(&.as_s?) || raise "server.secret_key missing in #{path}"
-      if secret.empty? || secret == "CHANGE_ME"
-        raise "server.secret_key must be a real secret (openssl rand -hex 32)"
+      # Secrets may come from the environment instead of the file, so the
+      # config can live in the Nix store / a ConfigMap and secrets in an
+      # environment file (agenix, sops-nix, podman secrets).
+      env = ->(k : String) { ENV[k]?.presence }
+      secret = env.call("MD_EDITOR_SECRET_KEY") || t.dig?("server", "secret_key").try(&.as_s?) ||
+               raise "server.secret_key missing (or set MD_EDITOR_SECRET_KEY)"
+      if secret.empty? || secret == "CHANGE_ME" || secret.size < 32
+        raise "server.secret_key must be a real secret of 32+ chars (openssl rand -hex 32)"
       end
 
       new(
@@ -58,13 +74,17 @@ module MdEditor
         port: t.dig?("server", "port").try(&.as_i) || 3000,
         secret_key: secret,
         data_dir: t.dig?("server", "data_dir").try(&.as_s?) || "./data",
-        public_origin: t.dig?("server", "public_origin").try(&.as_s?) || "http://localhost:5175",
+        public_origin: (t.dig?("server", "public_origin").try(&.as_s?) || "http://localhost:5175").rchop("/"),
         public_dir: t.dig?("server", "public_dir").try(&.as_s?) || default_public_dir,
         dev_auto_login: t.dig?("server", "dev_auto_login").try(&.as_bool?) || false,
-        github_client_id: t.dig?("providers", "github", "client_id").try(&.as_s?),
-        github_client_secret: t.dig?("providers", "github", "client_secret").try(&.as_s?),
-        gitlab_client_id: t.dig?("providers", "gitlab", "client_id").try(&.as_s?),
-        gitlab_client_secret: t.dig?("providers", "gitlab", "client_secret").try(&.as_s?),
+        github_client_id: env.call("MD_EDITOR_GITHUB_CLIENT_ID") || t.dig?("providers", "github", "client_id").try(&.as_s?).presence,
+        github_client_secret: env.call("MD_EDITOR_GITHUB_CLIENT_SECRET") || t.dig?("providers", "github", "client_secret").try(&.as_s?).presence,
+        gitlab_client_id: env.call("MD_EDITOR_GITLAB_CLIENT_ID") || t.dig?("providers", "gitlab", "client_id").try(&.as_s?).presence,
+        gitlab_client_secret: env.call("MD_EDITOR_GITLAB_CLIENT_SECRET") || t.dig?("providers", "gitlab", "client_secret").try(&.as_s?).presence,
+        gitlab_base_url: t.dig?("providers", "gitlab", "base_url").try(&.as_s?) || "https://gitlab.com",
+        gate_password: ENV["MD_EDITOR_GATE_PASSWORD"]?.presence || t.dig?("access", "password").try(&.as_s?).presence,
+        allowed_users: (t.dig?("access", "allowed_users").try(&.as_a?) || [] of TOML::Any)
+          .compact_map(&.as_s?).map(&.downcase),
       )
     end
 
@@ -80,6 +100,14 @@ module MdEditor
         candidates << File.expand_path("../public", exe_dir)
       end
       candidates.find { |c| Dir.exists?(c) } || "./public"
+    end
+
+    def gate_enabled? : Bool
+      !gate_password.nil? && !dev_auto_login
+    end
+
+    def user_allowed?(provider : String, login : String) : Bool
+      allowed_users.empty? || allowed_users.includes?("#{provider}:#{login}".downcase)
     end
 
     def db_path : String

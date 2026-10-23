@@ -43,6 +43,11 @@ module MdEditor
         PRIMARY KEY (repo_id, path)
       );
       SQL
+    # additive migrations (SQLite has no ADD COLUMN IF NOT EXISTS)
+    user_cols = database.query_all("SELECT name FROM pragma_table_info('users')", as: String)
+    {"refresh_token_enc" => "TEXT", "token_expires_at" => "INTEGER"}.each do |col, type|
+      database.exec("ALTER TABLE users ADD COLUMN #{col} #{type}") unless user_cols.includes?(col)
+    end
     @@db = database
     database
   end

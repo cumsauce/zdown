@@ -41,6 +41,34 @@ module MdEditor
       nil
     end
 
+    GATE_COOKIE = "md_editor_gate"
+    GATE_TTL    = 30.days
+
+    # Gate pass: "<expires>.<hmac>", keyed on the secret *and* the password,
+    # so changing the password invalidates every pass.
+    def sign_gate(password : String) : String
+      exp = Time.utc.to_unix + GATE_TTL.total_seconds.to_i64
+      "#{exp}.#{gate_sig(exp, password)}"
+    end
+
+    def verify_gate(token : String, password : String) : Bool
+      exp_s, _, sig = token.partition('.')
+      exp = exp_s.to_i64?
+      return false if exp.nil? || exp < Time.utc.to_unix
+      secure_compare(gate_sig(exp, password), sig)
+    end
+
+    def password_matches?(given : String, expected : String) : Bool
+      a = OpenSSL::HMAC.hexdigest(OpenSSL::Algorithm::SHA256, session_secret, given)
+      b = OpenSSL::HMAC.hexdigest(OpenSSL::Algorithm::SHA256, session_secret, expected)
+      secure_compare(a, b)
+    end
+
+    private def gate_sig(exp : Int64, password : String) : String
+      key = OpenSSL::HMAC.digest(OpenSSL::Algorithm::SHA256, MdEditor.config.secret_key, KEY_DERIVE_INFO + ":gate:" + password)
+      OpenSSL::HMAC.hexdigest(OpenSSL::Algorithm::SHA256, key, "gate.#{exp}")
+    end
+
     # AES-256-GCM. Output: hex(iv || tag || ciphertext).
     def encrypt(plain : String) : String
       cipher = OpenSSL::Cipher.new("aes-256-gcm")

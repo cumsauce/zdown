@@ -7,3 +7,7 @@
 # Runtime data
 /data/
 config.toml
+
+# Built SPA (vite → ../public); CI and the Containerfile build it
+/public/
+/frontend/node_modules/

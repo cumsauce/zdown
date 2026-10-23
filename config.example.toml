@@ -18,3 +18,10 @@ client_secret = ""
 # [providers.gitlab]
 # client_id = ""
 # client_secret = ""
+# base_url = "https://gitlab.example.com"   # self-hosted; default https://gitlab.com
+
+# Site-wide access control. Both are optional and both are ignored when
+# dev_auto_login is on.
+# [access]
+# password = ""          # shared password for the whole site (or env MD_EDITOR_GATE_PASSWORD)
+# allowed_users = ["github:you", "gitlab:you"]   # who may sign in; empty = anyone

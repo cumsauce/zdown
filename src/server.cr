@@ -5,6 +5,18 @@ MdEditor.configure
 MdEditor.init_db
 MdEditor::Routes.setup
 
+# Site gate first (position 1 = right after Kemal's init handler, before the
+# static file handler) so no file or route is reachable without a pass.
+Kemal.config.add_handler(MdEditor::Guard.new, 1)
+Kemal.config.add_handler(MdEditor::Gate.new, 2)
+
+if MdEditor.config.dev_auto_login
+  STDERR.puts "!" * 72
+  STDERR.puts "!! server.dev_auto_login is ON: every visitor is signed in as the first"
+  STDERR.puts "!! user, and the [access] gate/allowlist are disabled. DEV ONLY."
+  STDERR.puts "!" * 72
+end
+
 Kemal.config.host_binding = MdEditor.config.host
 Kemal.config.port = MdEditor.config.port
 
@@ -19,6 +31,12 @@ static_headers do |env, file_path, file_stat|
   if file_path.includes?("/assets/")
     env.response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
   end
+end
+
+# Liveness for container HEALTHCHECK / systemd; bypasses the gate, leaks nothing.
+get "/healthz" do |env|
+  env.response.content_type = "text/plain"
+  "ok"
 end
 
 # SPA fallback: any non-API, non-file path → index.html.

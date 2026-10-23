@@ -25,13 +25,39 @@ client_secret = "..."
 
 Scopes requested: `repo` (private repo read/write) and `read:user`.
 
-## GitLab (M2, same pattern)
+## GitLab
 
 1. GitLab → Preferences → Applications → **Add new application**
-   <https://gitlab.com/-/profile/applications>
+   <https://gitlab.com/-/user_settings/applications> (or your instance's equivalent)
 2. Redirect URI: `http://localhost:5175/api/auth/gitlab/callback`
-3. Scopes: `api`, `read_user`, `write_repository`
-4. Same `[providers.gitlab]` block in `config.toml`.
+3. Confidential: yes. Scopes: `api`, `read_user`, `write_repository`
+4. In `config.toml`:
+
+```toml
+[providers.gitlab]
+client_id = "..."       # "Application ID"
+client_secret = "..."
+# base_url = "https://gitlab.example.com"   # self-hosted only
+```
+
+GitLab access tokens expire after ~2 hours; the refresh token is stored
+(encrypted) and the server refreshes transparently. Git over HTTPS uses
+`Authorization: Basic oauth2:<token>` (GitLab's form), GitHub uses Bearer.
+
+Each provider login is its own account: a GitLab sign-in sees GitLab repos.
+
+## Restricting access
+
+```toml
+[access]
+password = "..."                       # site gate: every page, asset and API call
+allowed_users = ["github:lume", "gitlab:lume"]   # sign-in allowlist
+```
+
+The gate is a server-rendered `/gate` page that sets a signed, HttpOnly
+30-day cookie (changing the password invalidates it). `MD_EDITOR_GATE_PASSWORD`
+overrides the config value. Both checks are skipped when
+`server.dev_auto_login = true`.
 
 ## Token storage
 

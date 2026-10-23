@@ -38,7 +38,7 @@ repo_id = if existing = repo_id
 
 dest = MdEditor::Git.mirror_path(repo_id)
 unless Dir.exists?(dest)
-  MdEditor::Git.mirror_clone("https://github.com/#{full_name}.git", dest, "dev-token")
+  MdEditor::Git.mirror_clone("https://github.com/#{full_name}.git", dest, "Bearer dev-token")
 end
 
 puts "user=#{uid} repo=#{repo_id} mirror=#{dest}"

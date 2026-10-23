@@ -15,6 +15,22 @@ module MdEditor
     abstract def fetch_repos(access_token : String) : Array(RepoInfo)
     abstract def clone_url(full_name : String) : String
 
+    # Authorization header value for git-over-HTTPS (http.extraHeader).
+    def git_auth(access_token : String) : String
+      "Bearer #{access_token}"
+    end
+
+    # Exchange a refresh token for a new access token. Providers whose tokens
+    # don't expire (GitHub OAuth apps) return nil.
+    def refresh(refresh_token : String) : TokenResponse?
+      nil
+    end
+
+    # Human label for login buttons.
+    def label : String
+      id.capitalize
+    end
+
     record TokenResponse, access_token : String, refresh_token : String?, expires_in : Int64?
     record UserInfo, uid : String, login : String, name : String?, avatar_url : String?
     record RepoInfo, full_name : String, private : Bool, default_branch : String
@@ -28,7 +44,7 @@ module MdEditor
           h["github"] = GitHub.new(cid, MdEditor.config.github_client_secret.to_s)
         end
         if cid = MdEditor.config.gitlab_client_id
-          h["gitlab"] = GitLab.new(cid, MdEditor.config.gitlab_client_secret.to_s)
+          h["gitlab"] = GitLab.new(cid, MdEditor.config.gitlab_client_secret.to_s, MdEditor.config.gitlab_base_url)
         end
         h
       end

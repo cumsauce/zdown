@@ -29,7 +29,15 @@ module MdEditor
     end
 
     private def require_user(env) : Int64
-      current_user_id(env) || dev_auto_user_id || raise ApiError.new(401, "not signed in")
+      if uid = current_user_id(env)
+        # allowlist edits apply to existing sessions too, not just new logins
+        unless MdEditor.config.allowed_users.empty?
+          who = MdEditor.db.query_one?("SELECT provider, login FROM users WHERE id = ?", uid, as: {String, String})
+          raise ApiError.new(403, "not allowed on this server") unless who && MdEditor.config.user_allowed?(*who)
+        end
+        return uid
+      end
+      dev_auto_user_id || raise ApiError.new(401, "not signed in")
     end
 
     # Dev/test convenience (server.dev_auto_login): any browser is treated as
@@ -51,20 +59,61 @@ module MdEditor
       json_response(env, status, String.build { |io| JSON.build(io, &block) })
     end
 
+    MAX_BODY = 8 * 1024 * 1024 # a post is text; 8 MB is generous
+
     private def body_json(env) : JSON::Any
-      raw = env.request.body.try(&.gets_to_end)
+      raw = env.request.body.try { |b| read_limited(b) }
       raise ApiError.new(400, "expected JSON body") if raw.nil? || raw.empty?
       JSON.parse(raw)
     rescue e : JSON::ParseException
       raise ApiError.new(400, "invalid JSON")
     end
 
+    # Provider access token for a user, refreshed first when it has expired
+    # (GitLab tokens live ~2h; GitHub OAuth-app tokens never expire).
     private def user_token(uid : Int64, provider : String) : String
       row = MdEditor.db.query_one?(
-        "SELECT access_token_enc FROM users WHERE id = ? AND provider = ?", uid, provider,
-        as: {String})
+        "SELECT access_token_enc, refresh_token_enc, token_expires_at FROM users WHERE id = ? AND provider = ?",
+        uid, provider, as: {String, String?, Int64?})
       raise ApiError.new(401, "no provider token; re-login") unless row
-      Security.decrypt(row) || raise ApiError.new(500, "stored token undecryptable (secret changed?)")
+      enc, refresh_enc, expires_at = row
+      if expires_at && expires_at - 60 < Time.utc.to_unix && refresh_enc
+        return refresh_user_token(uid, provider, refresh_enc)
+      end
+      Security.decrypt(enc) || raise ApiError.new(500, "stored token undecryptable (secret changed?)")
+    end
+
+    private def refresh_user_token(uid : Int64, provider_id : String, refresh_enc : String) : String
+      refresh = Security.decrypt(refresh_enc) || raise ApiError.new(401, "stored refresh token unreadable; sign in again")
+      provider = Provider.find(provider_id) || raise ApiError.new(500, "provider #{provider_id} not configured")
+      tok = begin
+        provider.refresh(refresh)
+      rescue e
+        raise ApiError.new(401, "#{provider.label} session expired; sign in again")
+      end
+      raise ApiError.new(401, "#{provider.label} session expired; sign in again") unless tok
+      store_token(uid, tok, keep_refresh: refresh_enc)
+      tok.access_token
+    end
+
+    private def store_token(uid : Int64, tok : Provider::TokenResponse, keep_refresh : String? = nil) : Nil
+      MdEditor.db.exec(
+        "UPDATE users SET access_token_enc = ?, refresh_token_enc = ?, token_expires_at = ? WHERE id = ?",
+        Security.encrypt(tok.access_token),
+        tok.refresh_token.try { |r| Security.encrypt(r) } || keep_refresh,
+        tok.expires_in.try { |s| Time.utc.to_unix + s },
+        uid)
+    end
+
+    private def read_limited(io : IO) : String
+      buf = IO::Memory.new
+      copied = IO.copy(io, buf, MAX_BODY + 1)
+      raise ApiError.new(413, "request body too large") if copied > MAX_BODY
+      buf.to_s
+    end
+
+    private def secure_cookies? : Bool
+      MdEditor.config.public_origin.starts_with?("https://")
     end
 
     private def user_branch(repo) : String
@@ -114,7 +163,7 @@ module MdEditor
         raise ApiError.new(404, "unknown provider") unless provider
         state = Random::Secure.hex(16)
         env.response.cookies << HTTP::Cookie.new("md_oauth_state", state, http_only: true,
-          samesite: :lax, max_age: 10.minutes, path: "/")
+          secure: secure_cookies?, samesite: :lax, max_age: 10.minutes, path: "/")
         env.redirect provider.authorize_url(state)
       end
 
@@ -132,6 +181,12 @@ module MdEditor
         token = with_provider_api { provider.exchange_code(code) }
         user = with_provider_api { provider.fetch_user(token.access_token) }
 
+        # [access] allowed_users: refuse before any row is written.
+        unless MdEditor.config.user_allowed?(provider.id, user.login)
+          env.response.cookies.delete("md_oauth_state")
+          next env.redirect "#{MdEditor.config.public_origin}/?error=not_allowed&who=#{URI.encode_www_form("#{provider.id}:#{user.login}")}"
+        end
+
         existing = MdEditor.db.query_one?(
           "SELECT id FROM users WHERE provider = ? AND provider_uid = ?",
           provider.id, user.uid, as: {Int64})
@@ -142,17 +197,26 @@ module MdEditor
             "UPDATE users SET access_token_enc = ?, login = ?, name = ?, avatar_url = ? WHERE id = ?",
             Security.encrypt(token.access_token), user.login, user.name, user.avatar_url, ex)
           uid = ex
+          store_token(uid, token)
         else
           uid = MdEditor.db.scalar(
             "INSERT INTO users (provider, provider_uid, login, name, avatar_url, access_token_enc, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
             provider.id, user.uid, user.login, user.name, user.avatar_url,
             Security.encrypt(token.access_token), Time.utc.to_unix).as(Int64)
+          store_token(uid, token)
         end
 
         env.response.cookies << HTTP::Cookie.new(Security::SESSION_COOKIE, Security.sign_session(uid),
-          http_only: true, samesite: :lax, max_age: Security::SESSION_TTL, path: "/")
+          http_only: true, secure: secure_cookies?, samesite: :lax, max_age: Security::SESSION_TTL, path: "/")
         env.response.cookies.delete("md_oauth_state")
         env.redirect "#{MdEditor.config.public_origin}/"
+      end
+
+      # Public: which sign-in buttons the landing page should show.
+      get "/api/auth/providers" do |env|
+        json_response(env, 200, {
+          providers: Provider.registered.values.map { |p| {id: p.id, label: p.label} },
+        }.to_json)
       end
 
       post "/api/auth/logout" do |env|
@@ -261,7 +325,7 @@ module MdEditor
           uid, provider_id, full_name, default_branch, Time.utc.to_unix).as(Int64)
 
         begin
-          Git.mirror_clone(provider.clone_url(full_name), Git.mirror_path(repo_id), token)
+          Git.mirror_clone(provider.clone_url(full_name), Git.mirror_path(repo_id), provider.git_auth(token))
         rescue e : Git::Error
           # roll back the row; no orphaned repo entries
           MdEditor.db.exec("DELETE FROM repos WHERE id = ?", repo_id)
@@ -278,7 +342,7 @@ module MdEditor
         url = remote_url(repo)
         token = user_token(uid, repo[:provider])
 
-        Git.fetch_mirror(repo[:id], url, token)
+        Git.fetch_mirror(repo[:id], url, provider_for(repo).git_auth(token))
         json_response(env, 200, {ok: true, head: Git.default_branch(repo[:id])}.to_json)
       rescue e : Git::Error
         raise ApiError.new(502, "fetch failed: #{e.message}")
@@ -300,10 +364,16 @@ module MdEditor
       get "/api/repos/:repo_id/posts" do |env|
         uid = require_user(env)
         repo = repo_owned(env, uid)
+        # Refresh from the remote, but never let a remote outage (or expired
+        # token) lock the user out of their own local copy.
         unless local?(repo)
-          provider = provider_for(repo)
-          token = user_token(uid, repo[:provider])
-          Git.fetch_mirror(repo[:id], provider.clone_url(repo[:full_name]), token)
+          begin
+            provider = provider_for(repo)
+            token = user_token(uid, repo[:provider])
+            Git.fetch_mirror(repo[:id], provider.clone_url(repo[:full_name]), provider.git_auth(token))
+          rescue e : Git::Error | ApiError
+            env.response.headers["X-Sync-Error"] = (e.message || "fetch failed").gsub(/[\r\n]/, " ")[0, 200]
+          end
         end
 
         ref = Git.working_ref(repo[:id], user_branch(repo))
@@ -374,6 +444,8 @@ module MdEditor
         base_blob = body["base_blob"]?.try(&.as_s?)
         message = body["message"]?.try(&.as_s?)
         raise ApiError.new(400, "path and content required") unless path && content
+        raise ApiError.new(400, "invalid path (relative .md path, no .. or .git)") unless Git.valid_path?(path)
+        raise ApiError.new(400, "bad base_blob") if base_blob && !base_blob.matches?(/^[0-9a-f]{40,64}$/)
 
         login, name = MdEditor.db.query_one("SELECT login, name FROM users WHERE id = ?",
           uid, as: {String, String?})
@@ -441,7 +513,7 @@ module MdEditor
         raise ApiError.new(400, "nothing to publish") unless Git.branch_exists?(repo[:id], branch)
 
         head = Git.run_head_sha(repo[:id], branch)
-        Git.push_mirror(repo[:id], url, "#{branch}:refs/heads/#{repo[:default_branch]}", token)
+        Git.push_mirror(repo[:id], url, "#{branch}:refs/heads/#{repo[:default_branch]}", provider_for(repo).git_auth(token))
         json_response(env, 200, {ok: true, pushed: head}.to_json)
       rescue e : Git::Error
         raise ApiError.new(409, "push rejected (remote moved?): #{e.message}")
@@ -471,7 +543,7 @@ module MdEditor
 
         # Remote must be empty (or nonexistent) — we never overwrite content.
         begin
-          refs = Git.ls_remote_heads(repo[:id], provider.clone_url(full_name), token)
+          refs = Git.ls_remote_heads(repo[:id], provider.clone_url(full_name), provider.git_auth(token))
           raise ApiError.new(409, "remote not empty (#{refs.join(", ")})") unless refs.empty?
         rescue e : Git::Error
           raise ApiError.new(502, "remote unreachable: #{e.message}")
@@ -485,7 +557,7 @@ module MdEditor
         push_from = head ? branch : main
         pushed = Git.run_head_sha(repo[:id], push_from)
         begin
-          Git.push_mirror(repo[:id], provider.clone_url(full_name), "#{push_from}:refs/heads/#{main}", token)
+          Git.push_mirror(repo[:id], provider.clone_url(full_name), "#{push_from}:refs/heads/#{main}", provider.git_auth(token))
         rescue e : Git::Error
           raise ApiError.new(409, "push rejected: #{e.message}")
         end

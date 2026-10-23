@@ -32,10 +32,12 @@ module MdEditor
       @@repos_dir_override || MdEditor.config.repos_dir
     end
 
-    # clone --mirror requires a URL; token goes in an extra header.
-    def mirror_clone(url : String, dest : String, token : String) : Nil
+    # clone --mirror requires a URL; credentials go in an extra header.
+    # `auth` is the full Authorization header value (Provider#git_auth).
+    def mirror_clone(url : String, dest : String, auth : String) : Nil
       Dir.mkdir_p(File.dirname(dest))
-      run(["clone", "--mirror", url, dest], token: token)
+      run(["clone", "--mirror", url, dest], auth: auth)
+      ensure_reflog(dest)
     end
 
     # Create an empty bare repo with an initial (root) commit on `branch` so
@@ -47,6 +49,7 @@ module MdEditor
       Dir.mkdir_p(File.dirname(dest))
       run(["init", "--bare", "--quiet", "--initial-branch=#{branch}", dest])
       cwd = dest
+      ensure_reflog(cwd)
       tree = run(["mktree"], cwd: cwd, stdin: "").strip
       readme = write_blob(cwd, "+++\ntitle = \"Notes\"\n+++\n\nJust start writing.\n")
       tree = build_tree(cwd, tree, "README.md", readme)
@@ -60,12 +63,40 @@ module MdEditor
       run(["symbolic-ref", "HEAD", "refs/heads/#{branch}"], cwd: cwd)
     end
 
-    def fetch_mirror(repo_id : Int64, url : String, token : String) : Nil
-      run(["fetch", "--prune", url, "+refs/*:refs/*"], cwd: mirror_path(repo_id), token: token)
+    # Working branches ("<name>-user") exist only here until published — the
+    # remote never has them. A plain `fetch --prune +refs/*:refs/*` would
+    # therefore delete them (and a same-named remote branch would overwrite
+    # them). The negative refspec keeps every *-user branch out of both the
+    # update and the prune. Only branches + tags are mirrored (no refs/pull/*).
+    WORK_BRANCHES = "refs/heads/*-user"
+
+    def fetch_mirror(repo_id : Int64, url : String, auth : String) : Nil
+      cwd = mirror_path(repo_id)
+      ensure_reflog(cwd)
+      run(["fetch", "--prune", "--no-write-fetch-head", url,
+           "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*", "^#{WORK_BRANCHES}"],
+        cwd: cwd, auth: auth)
     end
 
-    def push_mirror(repo_id : Int64, url : String, refspec : String, token : String) : Nil
-      run(["push", url, refspec], cwd: mirror_path(repo_id), token: token)
+    # Bare repos don't keep reflogs by default; turn them on so any ref move
+    # (ours or git's) stays recoverable with `git reflog`.
+    def ensure_reflog(cwd : String) : Nil
+      run(["config", "core.logAllRefUpdates", "always"], cwd: cwd)
+    end
+
+    # Repo-relative path a client may write: no absolute paths, no `..` or
+    # `.git` components, no control characters, markdown only.
+    def valid_path?(path : String) : Bool
+      return false if path.empty? || path.bytesize > 1024
+      return false if path.starts_with?('/') || path.includes?('\\')
+      return false if path.each_char.any? { |c| c.ord < 0x20 || c.ord == 0x7f }
+      parts = path.split('/')
+      return false if parts.any? { |p| p.empty? || p == "." || p == ".." || p.downcase == ".git" }
+      path.downcase.ends_with?(".md") || path.downcase.ends_with?(".markdown")
+    end
+
+    def push_mirror(repo_id : Int64, url : String, refspec : String, auth : String) : Nil
+      run(["push", url, refspec], cwd: mirror_path(repo_id), auth: auth)
     end
 
     # Attach a remote to a previously local-only repo (no-op when it already
@@ -78,8 +109,8 @@ module MdEditor
 
     # Branch heads of a remote, before cloning/pushing to it. Empty for a
     # brand-new (never pushed) repo.
-    def ls_remote_heads(repo_id : Int64, url : String, token : String) : Array(String)
-      run(["ls-remote", "--heads", url], cwd: mirror_path(repo_id), token: token)
+    def ls_remote_heads(repo_id : Int64, url : String, auth : String) : Array(String)
+      run(["ls-remote", "--heads", url], cwd: mirror_path(repo_id), auth: auth)
         .lines.compact_map { |l| l.split('\t')[1]?.try(&.sub("refs/heads/", "")) }
     end
 
@@ -151,11 +182,14 @@ module MdEditor
       blob = write_blob(cwd, content)
       tree = build_tree(cwd, parent, path, blob)
       commit = commit_tree(cwd, tree, parent, message, author_name, author_email)
-      # When creating a branch, there is no old value to CAS against.
-      if branch_exists?(repo_id, branch)
-        update_ref(cwd, "refs/heads/#{branch}", commit, parent)
-      else
-        run(["update-ref", "refs/heads/#{branch}", commit], cwd: cwd)
+      # Compare-and-swap on the ref: if another save moved the branch since
+      # we read `parent` — or created it, when it didn't exist yet (old value
+      # "" = must not exist) — update-ref fails and nothing is overwritten.
+      old = branch_exists?(repo_id, branch) ? parent : ""
+      begin
+        update_ref(cwd, "refs/heads/#{branch}", commit, old)
+      rescue e : Error
+        raise Conflict.new("branch moved during save; reload and retry")
       end
       blob
     end
@@ -237,19 +271,25 @@ module MdEditor
     # ---- process plumbing ----
 
     private def run(args : Array(String), cwd : String? = nil,
-                    stdin : String? = nil, token : String? = nil,
+                    stdin : String? = nil, auth : String? = nil,
                     env : Hash(String, String)? = nil) : String
       full = Array(String).new
-      if token
-        full << "-c" << "http.extraHeader=Authorization: Bearer #{token}"
-        full << "-c" << "http.lowSpeedLimit=1000" << "-c" << "http.lowSpeedTime=30"
-      end
       full << "-c" << "core.askpass="
       full.concat(args)
 
       sout = IO::Memory.new
       serr = IO::Memory.new
       full_env = {"GIT_TERMINAL_PROMPT" => "0"}
+      if auth
+        # via GIT_CONFIG_* env, not `-c`: argv is visible in `ps` to anyone on
+        # the host, the environment is not.
+        {"http.extraHeader" => "Authorization: #{auth}", "http.lowSpeedLimit" => "1000",
+         "http.lowSpeedTime" => "30"}.each_with_index do |(k, v), i|
+          full_env["GIT_CONFIG_KEY_#{i}"] = k
+          full_env["GIT_CONFIG_VALUE_#{i}"] = v
+        end
+        full_env["GIT_CONFIG_COUNT"] = "3"
+      end
       env.try &.each { |k, v| full_env[k] = v }
       status = Process.run("git", full, env: full_env,
         input: stdin ? IO::Memory.new(stdin) : Process::Redirect::Close,
