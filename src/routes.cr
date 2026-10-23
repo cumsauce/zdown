@@ -220,7 +220,12 @@ module MdEditor
       end
 
       post "/api/auth/logout" do |env|
-        env.response.cookies.delete(Security::SESSION_COOKIE)
+        # The response cookie jar starts empty (request cookies are never
+        # copied into it), so .delete there would emit no header at all.
+        # Deletion must reach the browser as an expired Set-Cookie.
+        env.response.cookies << HTTP::Cookie.new(Security::SESSION_COOKIE, "",
+          http_only: true, secure: secure_cookies?, samesite: :lax, path: "/",
+          expires: Time.unix(0), max_age: 0.seconds)
         json_response(env, 200, %({"ok":true}))
       end
 
