@@ -94,13 +94,25 @@ module MdEditor
 
     # Repo-relative path a client may write: no absolute paths, no `..` or
     # `.git` components, no control characters, markdown only.
-    def valid_path?(path : String) : Bool
+    # Relative-path safety shared by writes and raw reads: no absolute paths,
+    # no traversal, no control chars, no .git components.
+    private def safe_rel_path?(path : String) : Bool
       return false if path.empty? || path.bytesize > 1024
       return false if path.starts_with?('/') || path.includes?('\\')
       return false if path.each_char.any? { |c| c.ord < 0x20 || c.ord == 0x7f }
       parts = path.split('/')
-      return false if parts.any? { |p| p.empty? || p == "." || p == ".." || p.downcase == ".git" }
-      path.downcase.ends_with?(".md") || path.downcase.ends_with?(".markdown")
+      parts.all? { |p| !p.empty? && p != "." && p != ".." && p.downcase != ".git" }
+    end
+
+    # Writable = safe relative path that is also markdown (the editor only
+    # commits posts).
+    def valid_path?(path : String) : Bool
+      safe_rel_path?(path) && (path.downcase.ends_with?(".md") || path.downcase.ends_with?(".markdown"))
+    end
+
+    # Readable as a raw asset = any safe relative path (images etc.).
+    def valid_blob_path?(path : String) : Bool
+      safe_rel_path?(path)
     end
 
     def push_mirror(repo_id : Int64, url : String, refspec : String, auth : String) : Nil
@@ -160,6 +172,13 @@ module MdEditor
       status = run_status(["rev-parse", "--verify", "--quiet", "#{ref}:#{path}"], cwd: mirror_path(repo_id))
       return nil unless status == 0
       run(["rev-parse", "--verify", "#{ref}:#{path}"], cwd: mirror_path(repo_id)).strip
+    end
+
+    # Raw bytes of a blob (images are not UTF-8; a String would mangle them).
+    def read_blob(repo_id : Int64, ref : String, path : String) : Bytes
+      sout = IO::Memory.new
+      exec_git(["show", "#{ref}:#{path}"], cwd: mirror_path(repo_id), output: sout)
+      sout.to_slice
     end
 
     # Commit a single file's content onto `branch` (created from `base_ref` if new).
@@ -294,11 +313,18 @@ module MdEditor
     private def run(args : Array(String), cwd : String? = nil,
                     stdin : String? = nil, auth : String? = nil,
                     env : Hash(String, String)? = nil) : String
+      sout = IO::Memory.new
+      exec_git(args, cwd: cwd, stdin: stdin, auth: auth, env: env, output: sout)
+      sout.to_s
+    end
+
+    private def exec_git(args : Array(String), cwd : String? = nil,
+                         stdin : String? = nil, auth : String? = nil,
+                         env : Hash(String, String)? = nil, output : IO = IO::Memory.new) : Nil
       full = Array(String).new
       full << "-c" << "core.askpass="
       full.concat(args)
 
-      sout = IO::Memory.new
       serr = IO::Memory.new
       full_env = {"GIT_TERMINAL_PROMPT" => "0"}
       if auth
@@ -314,9 +340,8 @@ module MdEditor
       env.try &.each { |k, v| full_env[k] = v }
       status = Process.run("git", full, env: full_env,
         input: stdin ? IO::Memory.new(stdin) : Process::Redirect::Close,
-        output: sout, error: serr, chdir: cwd)
+        output: output, error: serr, chdir: cwd)
       raise Error.new(serr.to_s) unless status.success?
-      sout.to_s
     end
 
     private def run_status(args : Array(String), cwd : String? = nil) : Int32

@@ -496,7 +496,7 @@ export function Editor() {
         <div style={{ display: tab === 'write' ? 'flex' : 'none', flex: 1, minHeight: 0, minWidth: 0 }}>
           <CodeMirror ref={editor} value={content} onChange={onChange} showMarks={marks} onSave={() => void save()} onSelection={setSelBox} />
         </div>
-        {tab === 'preview' && <div style={{ flex: 1, overflowY: 'auto', minWidth: 0 }}><Preview content={content} /></div>}
+        {tab === 'preview' && <div style={{ flex: 1, overflowY: 'auto', minWidth: 0 }}><Preview content={content} repoId={repoId} path={path} /></div>}
         {sheet && (
           <SettingsPane aria-label="post settings">
             <PaneHead>

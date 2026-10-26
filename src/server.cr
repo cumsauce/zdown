@@ -74,21 +74,4 @@ private def serve_spa(env, path : String)
   end
 end
 
-# JSON errors, so API hits never get Kemal's HTML error page.
-error MdEditor::ApiError do |env, ex|
-  err = ex.as(MdEditor::ApiError)
-  env.response.status_code = err.status
-  env.response.headers["Content-Type"] = "application/json"
-  {"error" => err.message}.to_json
-end
-
-error 404 do |env|
-  env.response.headers["Content-Type"] = "application/json"
-  {"error" => "not found", "path" => env.request.path}.to_json
-end
-error 500 do |env|
-  env.response.headers["Content-Type"] = "application/json"
-  {"error" => "internal server error"}.to_json
-end
-
 Kemal.run

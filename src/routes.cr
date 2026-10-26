@@ -18,6 +18,7 @@ module MdEditor
       setup_auth
       setup_repos
       setup_posts
+      setup_errors
     end
 
     # ---------- helpers ----------
@@ -60,6 +61,13 @@ module MdEditor
     end
 
     MAX_BODY = 8 * 1024 * 1024 # a post is text; 8 MB is generous
+
+    # What GET /api/repos/:repo_id/raw will serve (preview in-repo assets).
+    RAW_IMAGE_TYPES = {
+      "png" => "image/png", "jpg" => "image/jpeg", "jpeg" => "image/jpeg",
+      "gif" => "image/gif", "webp" => "image/webp", "avif" => "image/avif",
+      "svg" => "image/svg+xml", "ico" => "image/x-icon", "bmp" => "image/bmp",
+    }
 
     private def body_json(env) : JSON::Any
       raw = env.request.body.try { |b| read_limited(b) }
@@ -153,6 +161,30 @@ module MdEditor
       raise e
     rescue e
       raise ApiError.new(502, "provider API failed: #{e.message}")
+    end
+
+    # ---------- error contract ----------
+
+    # JSON errors, so API hits never get Kemal's HTML error page. Registered
+    # with the routes (not in server.cr) so any boot of the route stack —
+    # production or spec — serves the same contract.
+    private def setup_errors
+      error ApiError do |env, ex|
+        err = ex.as(ApiError)
+        env.response.status_code = err.status
+        env.response.headers["Content-Type"] = "application/json"
+        {"error" => err.message}.to_json
+      end
+
+      error 404 do |env|
+        env.response.headers["Content-Type"] = "application/json"
+        {"error" => "not found", "path" => env.request.path}.to_json
+      end
+
+      error 500 do |env|
+        env.response.headers["Content-Type"] = "application/json"
+        {"error" => "internal server error"}.to_json
+      end
     end
 
     # ---------- auth ----------
@@ -493,6 +525,38 @@ module MdEditor
         raise ApiError.new(409, "conflict: #{e.message}")
       rescue e : Git::Error
         raise ApiError.new(502, "git failed: #{e.message}")
+      end
+
+      # Serve a repo file at the working ref so the preview can show in-repo
+      # images (`![](assets/pic.png)`). Images only, binary-safe; Etag is the
+      # blob sha so preview toggles revalidate to 304s.
+      get "/api/repos/:repo_id/raw" do |env|
+        uid = require_user(env)
+        repo = repo_owned(env, uid)
+        path = env.params.query["path"]?
+        raise ApiError.new(400, "path required") unless path
+        raise ApiError.new(400, "invalid path") unless Git.valid_blob_path?(path)
+        ext = path.split('.').last?.try(&.downcase) || ""
+        type = RAW_IMAGE_TYPES[ext]? || raise ApiError.new(415, "only images are served here")
+
+        ref = Git.working_ref(repo[:id], user_branch(repo))
+        sha = Git.file_blob(repo[:id], ref, path) || raise ApiError.new(404, "not found: #{path}")
+
+        env.response.headers["Cache-Control"] = "no-cache"
+        env.response.headers["Etag"] = %("#{sha}")
+        if env.request.headers["If-None-Match"]? == %("#{sha}")
+          env.response.status_code = 304
+          env.response.content_type = type
+          next ""
+        end
+        # Navigating to the URL renders an SVG as a same-origin document; keep
+        # it scriptless (inside <img> scripts never run anyway).
+        env.response.headers["Content-Security-Policy"] = "default-src 'none'" if type == "image/svg+xml"
+        env.response.content_type = type
+        env.response.write(Git.read_blob(repo[:id], ref, path))
+        ""
+      rescue e : Git::Error
+        raise ApiError.new(404, "not found: #{path}")
       end
 
       get "/api/repos/:repo_id/post/versions" do |env|
