@@ -72,6 +72,13 @@ const editorTheme = EditorView.theme(
     '.cm-md-url': { color: C.fgFaint, fontFamily: C.mono, fontSize: '0.75em' },
     '.cm-md-quote': { color: C.fgMuted, fontStyle: 'italic' },
     '.cm-md-list': { color: C.accent },
+    // lists: hanging indent plus one visible step per nesting level — the raw
+    // 2-space markdown indent is invisible in a proportional serif font
+    '.cm-md-li0': { paddingLeft: '1.4em', textIndent: '-1.4em' },
+    '.cm-md-li1': { paddingLeft: '2.8em', textIndent: '-1.4em' },
+    '.cm-md-li2': { paddingLeft: '4.2em', textIndent: '-1.4em' },
+    '.cm-md-li3': { paddingLeft: '5.6em', textIndent: '-1.4em' },
+    '.cm-md-li4': { paddingLeft: '7em', textIndent: '-1.4em' },
     '.cm-md-shortcode': { fontFamily: C.mono, fontSize: '0.8em', color: C.accent, backgroundColor: C.accentWash },
     '.cm-md-hidden': { color: C.fgFaint, fontStyle: 'normal' },
   },
@@ -167,6 +174,7 @@ function build(view: EditorView, showMarks: boolean): DecorationSet {
       if (li) {
         const s = bodyStart + li[1].length;
         out.push(mark('cm-md-list').range(l.from + s, l.from + s + li[2].length));
+        out.push(line(`cm-md-li${Math.min(4, Math.floor(li[1].length / 2))}`).range(l.from));
         bodyStart += li[0].length;
       }
     }
@@ -277,6 +285,29 @@ function insertLink(v: EditorView): boolean {
   return true;
 }
 
+/** Tab/Shift-Tab on list lines nest/un-nest the item two spaces at a time
+ *  (the default indent commands mangle list markers — measured " - - two").
+ *  Returns false when no selected line is a list item, so plain text and code
+ *  keep the standard indent behavior. */
+function indentList(v: EditorView, nest: boolean): boolean {
+  const { state } = v;
+  const changes: { from: number; to?: number; insert?: string }[] = [];
+  for (const r of state.selection.ranges) {
+    for (let n = state.doc.lineAt(r.from).number; n <= state.doc.lineAt(r.to).number; n++) {
+      const l = state.doc.line(n);
+      if (!/^(\s*)([-*+]|\d+[.)])(\s+)/.test(l.text)) continue;
+      if (nest) changes.push({ from: l.from, insert: '  ' });
+      else {
+        const lead = /^ {1,2}/.exec(l.text);
+        if (lead) changes.push({ from: l.from, to: l.from + lead[0].length });
+      }
+    }
+  }
+  if (!changes.length) return false;
+  v.dispatch({ changes, scrollIntoView: true });
+  return true;
+}
+
 export interface CodeMirrorHandle {
   /** wrap the selection in before/after, or insert at the cursor */
   insert(before: string, after?: string): void;
@@ -361,6 +392,8 @@ export const CodeMirror = forwardRef<CodeMirrorHandle, Props>(function CodeMirro
             { key: 'Mod-i', preventDefault: true, run: (v) => toggleWrap(v, '*') },
             { key: 'Mod-e', preventDefault: true, run: (v) => toggleWrap(v, '`') },
             { key: 'Mod-k', preventDefault: true, run: insertLink },
+            { key: 'Tab', run: (v) => indentList(v, true) },
+            { key: 'Shift-Tab', run: (v) => indentList(v, false) },
             ...markdownKeymap,
             ...defaultKeymap,
             ...historyKeymap,
