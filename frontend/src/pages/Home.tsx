@@ -1,196 +1,149 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
-import { styled } from 'baseui';
-import { Select } from 'baseui/select';
-import { SIZE } from 'baseui/input';
-import { api, ApiError, errorMessage, type Repo } from '../api';
-import { useShell } from '../components/AppShell';
-import { Hint, TextInput } from '../components/ui';
-import { tomlLiteral } from '../lib/frontmatter';
-import { editUrl, recents } from '../lib/recents';
+import { useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { styled } from 'styletron-react';
+import { api, type Repo } from '../api';
+import { Icon } from '../components/icons';
+import { Btn, Center, Grow, H1, H2, Loading, Muted, Page, quietLink, RowList, Section, Spinner } from '../components/ui';
+import { editUrl, useRecents } from '../lib/recents';
+import { repoStore, useRepos, useSite } from '../lib/store';
+import { relTime } from '../lib/time';
 import { notifyError } from '../notify';
-import { tokens } from '../theme';
+import { HOVER, PHONE, tokens } from '../theme';
 
-// The signed-in landing is a blank page. Start typing: once there's a body
-// (or you press Enter in the title) the file is created as a commit and the
-// page becomes the real editor, cursor where you left off. Nothing to click.
-// Default destination is a local "notes" scratchpad, created on first use.
+// Where you left off, and your sites. A place to go from, not a form: writing
+// always happens in the one editor, so nothing here morphs as you type.
 
-const NEW_NOTES = 'new:notes';
-const DEST_KEY = 'zdown.dest';
-const DIR_KEY = 'zdown.dir.';
-const IDLE_MS = 700;
-
-const Wrap = styled('div', {
-  maxWidth: '720px',
-  margin: '0 auto',
-  padding: '48px 24px 96px',
+const DocRow = styled(Link, {
   display: 'flex',
-  flexDirection: 'column',
-  minHeight: 'calc(100vh - 48px)',
-  '@media (max-width: 639px)': { padding: '16px 14px 64px' },
+  alignItems: 'baseline',
+  gap: '12px',
+  padding: '12px 4px',
+  borderBottom: `1px solid ${tokens.rule}`,
+  minWidth: 0,
+  [HOVER]: { ':hover': { backgroundColor: tokens.hover } },
+  ':active': { backgroundColor: tokens.active },
+  [PHONE]: { flexDirection: 'column', gap: '2px' },
 });
 
-const Where = styled('div', {
+const DocTitle = styled('span', {
+  fontFamily: tokens.serif,
+  fontSize: '19px',
+  lineHeight: 1.25,
+  color: tokens.fg,
+  flex: 1,
+  minWidth: 0,
+  overflowWrap: 'anywhere',
+});
+
+const SiteRow = styled('div', {
   display: 'flex',
   alignItems: 'center',
-  gap: '8px',
-  marginBottom: '6px',
+  gap: '12px',
+  borderBottom: `1px solid ${tokens.rule}`,
+  minWidth: 0,
 });
 
-const TitleField = styled('input', {
-  border: 'none',
-  outline: 'none',
-  background: 'none',
-  padding: 0,
-  margin: '0 0 12px',
-  width: '100%',
-  fontFamily: tokens.serif,
-  fontSize: '32px',
-  fontWeight: 500,
-  color: tokens.fg,
-  '::placeholder': { color: tokens.fgFaint },
-  '@media (max-width: 639px)': { fontSize: '24px' },
-});
-
-const BodyField = styled('textarea', {
-  border: 'none',
-  outline: 'none',
-  background: 'none',
-  resize: 'none',
-  padding: 0,
+const SiteLink = styled(Link, {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '1px',
   flex: 1,
-  minHeight: '50vh',
-  width: '100%',
-  fontFamily: tokens.serif,
-  fontSize: '17px',
-  lineHeight: 1.65,
-  color: tokens.fgSoft,
-  '::placeholder': { color: tokens.fgFaint },
+  minWidth: 0,
+  padding: '12px 4px',
+  [HOVER]: { ':hover': { color: tokens.accent } },
 });
 
-const slugify = (s: string) =>
-  s.toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '')
-    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'untitled';
+const SiteName = styled('span', { fontSize: '15px', fontWeight: 500, color: tokens.fg, overflowWrap: 'anywhere' });
 
-const store = {
-  get: (k: string) => { try { return localStorage.getItem(k); } catch { return null; } },
-  set: (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* ignore */ } },
-};
+const ManageLink = styled(Link, quietLink);
 
-const defaultDir = (r: Repo | undefined) =>
-  (r && store.get(DIR_KEY + r.id)) ?? (r && r.provider !== 'local' ? 'content/' : '');
+const fileName = (path: string) => (path.split('/').pop() ?? path).replace(/\.(md|markdown)$/i, '');
 
-const compose = (title: string, body: string) => {
-  const today = new Date().toISOString().slice(0, 10);
-  return `+++\ntitle = ${tomlLiteral(title.trim() || 'Untitled')}\ndate = ${today}\n+++\n\n${body}`;
-};
+function SiteEntry({ repo }: { repo: Repo }) {
+  const { data, tree } = useSite(repo.id);
+  const short = repo.full_name.split('/').pop();
+  const ahead = data?.status.changed.length ?? 0;
+  const count = tree?.root.total;
+  const meta = [
+    repo.provider === 'local' ? 'Scratchpad' : repo.full_name,
+    count !== undefined ? `${count} ${count === 1 ? 'post' : 'posts'}` : null,
+    ahead && repo.provider !== 'local' ? `${ahead} unpublished` : null,
+  ].filter(Boolean).join(' · ');
+  return (
+    <SiteRow>
+      <SiteLink to={`/repos/${repo.id}`}>
+        <SiteName>{data?.site.title || short}</SiteName>
+        <Muted>{meta}</Muted>
+      </SiteLink>
+      <Icon name="forward" size={16} style={{ color: tokens.fgFaint, marginRight: 4 }} />
+    </SiteRow>
+  );
+}
 
 export function Home() {
-  const { repos, reloadRepos } = useShell();
+  const repos = useRepos();
+  const recent = useRecents();
   const navigate = useNavigate();
-  const loc = useLocation();
-  const [title, setTitle] = useState('');
-  const [body, setBody] = useState('');
-  const [dest, setDest] = useState<string | null>(null);
-  const [dir, setDir] = useState<string | null>(null); // null = derived from destination
-  const [state, setState] = useState<'idle' | 'saving' | 'error'>('idle');
-  const titleRef = useRef<HTMLInputElement>(null);
-  const bodyRef = useRef<HTMLTextAreaElement>(null);
-  const latest = useRef({ title, body });
-  latest.current = { title, body };
-  const creating = useRef(false);
+  const [creating, setCreating] = useState(false);
 
-  // "+ New file" while already here resets the page.
-  useEffect(() => { setTitle(''); setBody(''); setDir(null); setState('idle'); titleRef.current?.focus(); }, [loc.state]);
+  if (repos === null) return <Loading />;
 
-  const options = useMemo(() => {
-    const list = (repos ?? []).map((r) => ({
-      id: String(r.id),
-      label: `${r.full_name.split('/').pop()}${r.provider === 'local' ? ' · local' : ` · ${r.full_name}`}`,
-    }));
-    if (!(repos ?? []).some((r) => r.provider === 'local')) list.unshift({ id: NEW_NOTES, label: 'notes · local' });
-    return list;
-  }, [repos]);
-
-  // Destination: last used, else first local scratchpad, else a new "notes".
-  const destId = dest ?? (() => {
-    const last = store.get(DEST_KEY);
-    if (last && options.some((o) => o.id === last)) return last;
-    const local = (repos ?? []).find((r) => r.provider === 'local');
-    return local ? String(local.id) : options[0]?.id ?? NEW_NOTES;
-  })();
-  const destRepo = repos?.find((r) => String(r.id) === destId);
-  const folder = (dir ?? defaultDir(destRepo)).replace(/^\/+/, '');
-  const prefix = folder && !folder.endsWith('/') ? `${folder}/` : folder;
-  const path = `${prefix}${slugify(title)}.md`;
-
-  const create = async () => {
-    if (creating.current || !repos) return;
-    creating.current = true;
-    setState('saving');
+  const scratch = async () => {
+    setCreating(true);
     try {
-      let repoId: number;
-      if (destId === NEW_NOTES) {
-        repoId = (await api.createScratch('notes')).id;
-        reloadRepos();
-      } else {
-        repoId = Number(destId);
-      }
-      // Never overwrite: bump the name until it's free.
-      let p = path;
-      for (let n = 2; ; n++) {
-        try { await api.post(repoId, p); p = path.replace(/\.md$/, `-${n}.md`); }
-        catch (e) { if (e instanceof ApiError && e.status === 404) break; throw e; }
-      }
-      const first = compose(latest.current.title, latest.current.body);
-      await api.save(repoId, { path: p, content: first, message: `new: ${p}` });
-      store.set(DEST_KEY, String(repoId));
-      if (dir !== null) store.set(DIR_KEY + repoId, folder);
-      recents.touch(repoId, p, latest.current.title.trim() || 'Untitled');
-      // Anything typed while the save was in flight rides along to the editor.
-      const now = compose(latest.current.title, latest.current.body);
-      navigate(editUrl(repoId, p), { replace: true, state: { pending: now !== first ? now : undefined, focusEnd: true } });
-    } catch (e) {
-      creating.current = false;
-      setState('error');
-      notifyError(new Error(`couldn't create the file: ${errorMessage(e)}`));
-    }
+      const r = await api.createScratch('notes');
+      await repoStore.reload();
+      navigate(`/repos/${r.id}/edit?new=1&in=`);
+    } catch (e) { notifyError(e); } finally { setCreating(false); }
   };
 
-  // Autosave-by-creation: once there's body text and you pause, it's a file.
-  useEffect(() => {
-    if (!body.trim() || state !== 'idle') return;
-    const t = setTimeout(() => void create(), IDLE_MS);
-    return () => clearTimeout(t);
-  }); // eslint-disable-line react-hooks/exhaustive-deps
+  if (repos.length === 0) {
+    return (
+      <Center style={{ minHeight: '70vh' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 440, alignItems: 'center' }}>
+          <H1>Bring in your site</H1>
+          <Muted style={{ fontSize: 15, lineHeight: 1.5 }}>Import a Zola site from your git provider to write and publish from anywhere, or start with a scratchpad and connect it later.</Muted>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
+            <Btn kind="primary" onClick={() => navigate('/repos')}>Import a site</Btn>
+            <Btn loading={creating} onClick={() => void scratch()}>Start a scratchpad</Btn>
+          </div>
+        </div>
+      </Center>
+    );
+  }
 
-  const status = state === 'saving' ? 'saving…'
-    : state === 'error' ? 'not saved — keep typing to retry'
-    : body.trim() ? 'saving soon…' : 'saves automatically once you start writing';
+  const known = new Map(repos.map((r) => [r.id, r]));
+  const shownRecent = recent.filter((r) => known.has(r.repoId)).slice(0, 6);
 
   return (
-    <Wrap>
-      <Where>
-        <div style={{ flex: '0 1 200px', minWidth: 0 }}>
-          <Select size={SIZE.mini} options={options} clearable={false} searchable={false} aria-label="save to"
-            value={options.filter((o) => o.id === destId)} isLoading={repos === null}
-            onChange={(p) => { setDest(String(p.value[0]?.id)); setDir(null); }} />
+    <Page>
+      <H1>{shownRecent.length ? 'Pick up where you left off' : 'What will you write?'}</H1>
+
+      {shownRecent.length > 0 && (
+        <Section>
+          <RowList>
+            {shownRecent.map((r) => (
+              <DocRow key={`${r.repoId}:${r.path}`} to={editUrl(r.repoId, r.path)} title={r.path}>
+                <DocTitle>{r.title || fileName(r.path)}</DocTitle>
+                <Muted style={{ flexShrink: 0 }}>
+                  {known.get(r.repoId)!.full_name.split('/').pop()} · {relTime(r.at / 1000)}
+                </Muted>
+              </DocRow>
+            ))}
+          </RowList>
+        </Section>
+      )}
+
+      <Section>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <Grow><H2>Sites</H2></Grow>
+          <ManageLink to="/repos">Manage</ManageLink>
         </div>
-        <div style={{ flex: '0 1 140px', minWidth: 0 }}>
-          <TextInput value={folder} placeholder="folder" aria-label="folder" onChange={(e) => setDir(e.currentTarget.value)} />
-        </div>
-      </Where>
-      <Hint style={{ marginBottom: 32 }}>
-        {path} · <span style={{ color: state === 'error' ? tokens.negative : undefined }}>{status}</span>
-      </Hint>
-      <TitleField ref={titleRef} autoFocus value={title} placeholder="Untitled" aria-label="title"
-        onChange={(e) => { setTitle(e.currentTarget.value); if (state === 'error') setState('idle'); }}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') { e.preventDefault(); if (title.trim()) void create(); else bodyRef.current?.focus(); }
-        }} />
-      <BodyField ref={bodyRef} value={body} placeholder="Start writing…" aria-label="body"
-        onChange={(e) => { setBody(e.currentTarget.value); if (state === 'error') setState('idle'); }} />
-    </Wrap>
+        <RowList>{repos.map((r) => <SiteEntry key={r.id} repo={r} />)}</RowList>
+        {!repos.some((r) => r.provider === 'local') && (
+          <div>{creating ? <Spinner size={14} /> : <Btn kind="ghost" small style={{ marginLeft: -10 }} onClick={() => void scratch()}>Start a scratchpad for notes</Btn>}</div>
+        )}
+      </Section>
+    </Page>
   );
 }

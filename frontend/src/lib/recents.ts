@@ -32,6 +32,15 @@ export const recents = {
   },
   remove(repoId: number, path: string) { write(read().filter((r) => !(r.repoId === repoId && r.path === path))); },
   dropRepo(repoId: number) { write(read().filter((r) => r.repoId !== repoId)); },
+  /** Forget files that no longer exist in the repo. */
+  prune(repoId: number, paths: Set<string>) {
+    const list = read();
+    const kept = list.filter((r) => r.repoId !== repoId || paths.has(r.path));
+    if (kept.length !== list.length) write(kept);
+  },
+  rename(repoId: number, from: string, to: string) {
+    write(read().map((r) => (r.repoId === repoId && r.path === from ? { ...r, path: to } : r)));
+  },
 };
 
 export function useRecents(): Recent[] {

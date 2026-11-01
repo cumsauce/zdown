@@ -11,6 +11,7 @@ require "./gate"
 require "./guard"
 require "./git"
 require "./posts"
+require "./zola"
 require "./routes"
 
 module MdEditor

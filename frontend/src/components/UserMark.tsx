@@ -1,4 +1,4 @@
-import { styled } from 'baseui';
+import { styled } from 'styletron-react';
 import { tokens } from '../theme';
 
 const Avatar = styled('img', { borderRadius: '50%', flexShrink: 0 });
@@ -7,7 +7,7 @@ const Initial = styled('span', {
   borderRadius: '50%',
   backgroundColor: tokens.active,
   color: tokens.fgSoft,
-  fontSize: '11px',
+  fontSize: '12px',
   fontWeight: 600,
   display: 'grid',
   placeItems: 'center',

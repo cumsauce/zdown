@@ -1,55 +1,36 @@
-import { styled } from 'baseui';
 import { useEffect, useState } from 'react';
-import { Button, KIND } from 'baseui/button';
+import { styled } from 'styletron-react';
 import { api } from '../api';
-import { tokens } from '../theme';
+import { BrandDot } from '../components/AppShell';
+import { Banner, Btn } from '../components/ui';
+import { PHONE, tokens } from '../theme';
 
 const Hero = styled('main', {
-  minHeight: '100vh',
+  minHeight: '100dvh',
   display: 'flex',
   flexDirection: 'column',
   justifyContent: 'center',
-  gap: '24px',
-  maxWidth: '640px',
+  gap: '20px',
+  maxWidth: '620px',
   margin: '0 auto',
-  padding: '24px',
-  '@media (max-width: 639px)': { padding: '24px 14px' },
+  padding: '32px',
+  [PHONE]: { padding: '24px 20px' },
 });
+
+const Wordmark = styled('div', { fontFamily: tokens.serif, fontStyle: 'italic', fontWeight: 500, fontSize: '22px', color: tokens.fg });
 
 const Title = styled('h1', {
   fontFamily: tokens.serif,
   fontWeight: 500,
-  fontSize: '40px',
-  lineHeight: 1.15,
+  fontSize: '52px',
+  lineHeight: 1.05,
+  letterSpacing: '-.015em',
   margin: 0,
   color: tokens.fg,
+  [PHONE]: { fontSize: '40px' },
 });
 
-const Lede = styled('p', {
-  fontFamily: tokens.serif,
-  fontSize: '17px',
-  lineHeight: 1.6,
-  color: tokens.fgSoft,
-  margin: 0,
-});
-
-const Points = styled('ul', {
-  fontFamily: tokens.mono,
-  fontSize: '11px',
-  color: tokens.fgMuted,
-  lineHeight: 1.9,
-  margin: 0,
-  paddingLeft: '16px',
-});
-
-const Notice = styled('div', {
-  fontFamily: tokens.mono,
-  fontSize: '11px',
-  color: tokens.negative,
-  border: `1px solid ${tokens.dangerLine}`,
-  backgroundColor: tokens.dangerWash,
-  padding: '8px 14px',
-});
+const Lede = styled('p', { fontFamily: tokens.serif, fontSize: '21px', lineHeight: 1.5, color: tokens.fgSoft, margin: 0 });
 
 export function Landing() {
   const [providers, setProviders] = useState<{ id: string; label: string }[] | null>(null);
@@ -60,27 +41,19 @@ export function Landing() {
   const denied = q.get('error') === 'not_allowed';
   return (
     <Hero>
-      <div className="panel-title">md_editor</div>
-      <Title>Write your blog in markdown. Keep it in git.</Title>
+      <Wordmark>zdown<BrandDot /></Wordmark>
+      <Title>Write your Zola site from anywhere.</Title>
       <Lede>
-        A quiet editor for Zola-style sites. Every save is a commit on your own branch;
-        publish pushes it to your repository when you're ready. Works on a phone.
+        A quiet editor that shows your posts the way they'll read, components and images
+        included. Every save is a commit on your own branch; nothing goes live until you publish.
       </Lede>
-      <Points>
-        <li>live-formatted markdown with +++ toml front matter</li>
-        <li>full version history, diffs and one-click restore</li>
-        <li>local scratchpads — connect a repo later</li>
-      </Points>
-      {denied && (
-        <Notice>{q.get('who') ?? 'that account'} isn't on this server's allowlist — ask the admin to add it to [access] allowed_users.</Notice>
-      )}
+      {denied && <Banner $tone="negative" style={{ borderRadius: 8 }}>{q.get('who') ?? 'That account'} isn't on this server's allowlist. Ask the admin to add it to [access] allowed_users.</Banner>}
+      {providers?.length === 0 && <Banner $tone="warning" style={{ borderRadius: 8 }}>No sign-in providers configured. Add [providers.github] or [providers.gitlab] to config.toml.</Banner>}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        {providers?.length === 0 && <Notice>no sign-in providers configured — add [providers.github] or [providers.gitlab] to config.toml</Notice>}
         {providers?.map((p, i) => (
-          <Button key={p.id} kind={i === 0 ? KIND.primary : KIND.secondary}
-            onClick={() => window.location.assign(`/api/auth/${p.id}/start`)}>
+          <Btn key={p.id} kind={i === 0 ? 'primary' : 'secondary'} onClick={() => window.location.assign(`/api/auth/${p.id}/start`)}>
             Continue with {p.label}
-          </Button>
+          </Btn>
         ))}
       </div>
     </Hero>

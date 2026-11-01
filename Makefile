@@ -34,10 +34,12 @@ spec:
 
 # Dev binary: optimized enough to be fast at runtime, ~2.8s warm / 12.5s cold.
 build:
+	@mkdir -p bin
 	crystal build -O2 --no-debug src/server.cr -o $(BIN)
 
 # Shipping binary: full -O3 + single module + debug info.
 release:
+	@mkdir -p bin
 	crystal build --release src/server.cr -o $(BIN)
 
 clean:

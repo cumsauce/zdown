@@ -103,24 +103,25 @@ module MdEditor
       context.response.headers["Cache-Control"] = "no-store"
       context.response.print <<-HTML
         <!doctype html><html lang="en"><head><meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark">
-        <title>md_editor</title><style>
-        *{box-sizing:border-box}html,body{margin:0;background:#000;color:#fff;font:13px system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-        main{min-height:100vh;display:grid;place-items:center;padding:24px 16px}
-        form{width:100%;max-width:320px;display:flex;flex-direction:column;gap:12px}
-        h1{font-size:20px;font-weight:600;margin:0 0 4px;display:flex;align-items:center;gap:8px}
-        h1 i{width:10px;height:10px;background:#7dd3fc;display:inline-block}
-        p{margin:0;color:#8a8a8a;font:11px ui-monospace,"SF Mono",Menlo,monospace}
-        input{height:40px;padding:0 12px;background:#0a0a0a;border:1px solid #262626;color:#fff;font:16px system-ui,sans-serif;border-radius:0;outline:none}
-        input:focus{border-color:#7dd3fc}
-        button{height:40px;border:0;border-radius:0;background:#fff;color:#000;font:600 13px system-ui,sans-serif;cursor:pointer}
-        .err{color:#f87171}
+        <meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark">
+        <title>zdown</title><style>
+        :root{--bg:#fbfaf6;--fg:#1d1b17;--muted:#6b665c;--line:#e3dfd4;--field:#fff;--accent:#c43d1c;--neg:#b3261e}
+        @media (prefers-color-scheme:dark){:root{--bg:#171512;--fg:#f0ece2;--muted:#9c968a;--line:#322f29;--field:#1f1d19;--accent:#f27f58;--neg:#f28b82}}
+        *{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--fg);font:15px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,sans-serif}
+        main{min-height:100dvh;display:grid;place-items:center;padding:24px 20px}
+        form{width:100%;max-width:340px;display:flex;flex-direction:column;gap:12px}
+        h1{font:italic 500 26px Georgia,serif;margin:0 0 2px}h1 i{color:var(--accent);font-style:normal}
+        p{margin:0;color:var(--muted);font-size:14px}
+        input{height:44px;padding:0 12px;background:var(--field);border:1px solid var(--line);color:var(--fg);font:16px system-ui,sans-serif;border-radius:8px;outline:none}
+        input:focus{border-color:var(--accent)}
+        button{height:44px;border:0;border-radius:8px;background:var(--fg);color:var(--bg);font:500 15px system-ui,sans-serif;cursor:pointer}
+        .err{color:var(--neg)}
         </style></head><body><main><form method="post" action="#{PATH}">
-        <h1><i></i>md_editor</h1><p>this site is private — enter the access password</p>
+        <h1>zdown<i>.</i></h1><p>This site is private. Enter the access password.</p>
         <input type="hidden" name="next" value="#{HTML.escape(nxt)}">
-        <input type="password" name="password" placeholder="password" autocomplete="current-password" autofocus required>
+        <input type="password" name="password" placeholder="Password" autocomplete="current-password" autofocus required>
         #{error ? %(<p class="err">#{HTML.escape(error)}</p>) : ""}
-        <button type="submit">continue</button>
+        <button type="submit">Continue</button>
         </form></main></body></html>
         HTML
     end

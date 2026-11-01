@@ -20,6 +20,9 @@ module MdEditor
       "script-src 'self'",
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: https:",
+      # embeds from shortcodes (YouTube &c.); always sandboxed by the preview
+      "frame-src https:",
+      "media-src 'self' https:",
       "font-src 'self' data:",
       "connect-src 'self'",
       "object-src 'none'",

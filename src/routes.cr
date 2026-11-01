@@ -60,7 +60,8 @@ module MdEditor
       json_response(env, status, String.build { |io| JSON.build(io, &block) })
     end
 
-    MAX_BODY = 8 * 1024 * 1024 # a post is text; 8 MB is generous
+    MAX_BODY  = 8 * 1024 * 1024  # a post is text; 8 MB is generous
+    MAX_ASSET = 25 * 1024 * 1024 # a phone photo, resized by the client first
 
     # What GET /api/repos/:repo_id/raw will serve (preview in-repo assets).
     RAW_IMAGE_TYPES = {
@@ -168,6 +169,37 @@ module MdEditor
     # JSON errors, so API hits never get Kemal's HTML error page. Registered
     # with the routes (not in server.cr) so any boot of the route stack —
     # production or spec — serves the same contract.
+    private def author_of(uid : Int64, repo) : {String, String}
+      login, name = MdEditor.db.query_one("SELECT login, name FROM users WHERE id = ?",
+        uid, as: {String, String?})
+      {name.presence || login, local?(repo) ? "#{login}@local" : "#{login}@users.noreply.#{repo[:provider]}.com"}
+    end
+
+    # Fetch the remote, then bring the working branch up to it.
+    private def sync_repo(uid : Int64, repo, resolve : String? = nil) : Git::Integration
+      token = user_token(uid, repo[:provider])
+      Git.fetch_mirror(repo[:id], remote_url(repo), provider_for(repo).git_auth(token))
+      name, email = author_of(uid, repo)
+      Git.integrate(repo[:id], user_branch(repo), repo[:default_branch], name, email, resolve)
+    end
+
+    private def status_json(json : JSON::Builder, repo) : Nil
+      ahead, changed = Git.unpublished(repo[:id], user_branch(repo), repo[:default_branch])
+      json.object do
+        json.field("ahead", ahead)
+        json.field("changed") do
+          json.array do
+            changed.each do |c|
+              json.object do
+                json.field("status", c.status)
+                json.field("path", c.path)
+              end
+            end
+          end
+        end
+      end
+    end
+
     private def setup_errors
       error ApiError do |env, ex|
         err = ex.as(ApiError)
@@ -373,14 +405,17 @@ module MdEditor
                                  default_branch: default_branch}.to_json)
       end
 
+      # Fetch + integrate. `resolve` (mine|theirs) answers an earlier conflict.
       post "/api/repos/:repo_id/sync" do |env|
         uid = require_user(env)
         repo = repo_owned(env, uid)
-        url = remote_url(repo)
-        token = user_token(uid, repo[:provider])
+        resolve = env.params.query["resolve"]?
+        raise ApiError.new(400, "bad resolve") unless resolve.nil? || {"mine", "theirs"}.includes?(resolve)
 
-        Git.fetch_mirror(repo[:id], url, provider_for(repo).git_auth(token))
-        json_response(env, 200, {ok: true, head: Git.default_branch(repo[:id])}.to_json)
+        before = Git.head_sha(repo[:id], Git.working_ref(repo[:id], user_branch(repo)))
+        result = sync_repo(uid, repo, resolve)
+        after = Git.head_sha(repo[:id], Git.working_ref(repo[:id], user_branch(repo)))
+        json_response(env, 200, {ok: true, state: result.state, conflicts: result.conflicts, moved: before != after}.to_json)
       rescue e : Git::Error
         raise ApiError.new(502, "fetch failed: #{e.message}")
       end
@@ -398,36 +433,23 @@ module MdEditor
     # ---------- posts ----------
 
     private def setup_posts
+      # Reads the local mirror only, so the list opens instantly and works
+      # offline; the client calls /sync in the background and re-lists if
+      # anything moved.
       get "/api/repos/:repo_id/posts" do |env|
         uid = require_user(env)
         repo = repo_owned(env, uid)
-        # Refresh from the remote, but never let a remote outage (or expired
-        # token) lock the user out of their own local copy.
-        unless local?(repo)
-          begin
-            provider = provider_for(repo)
-            token = user_token(uid, repo[:provider])
-            Git.fetch_mirror(repo[:id], provider.clone_url(repo[:full_name]), provider.git_auth(token))
-          rescue e : Git::Error | ApiError
-            env.response.headers["X-Sync-Error"] = (e.message || "fetch failed").gsub(/[\r\n]/, " ")[0, 200]
+        ref = Git.working_ref(repo[:id], user_branch(repo))
+        site = Zola.snapshot(repo[:id], ref)
+
+        json_build(env, 200) do |json|
+          json.object do
+            json.field("head", site.head)
+            json.field("posts") { json.raw(site.posts_json) }
+            json.field("site") { json.raw(site.site_json) }
+            json.field("status") { status_json(json, repo) }
           end
         end
-
-        ref = Git.working_ref(repo[:id], user_branch(repo))
-        files = Git.list_markdown(repo[:id], ref)
-
-        posts = files.map do |blob, path|
-          parsed = Posts.parse(Git.read_file(repo[:id], ref, path))
-          {
-            path:               path,
-            title:              parsed.title,
-            blob:               blob,
-            shortcodes:         parsed.shortcodes,
-            valid_front_matter: parsed.valid_front_matter,
-          }
-        end
-
-        json_response(env, 200, posts.to_json)
       rescue e : Git::Error
         raise ApiError.new(502, "git failed: #{e.message}")
       end
@@ -480,21 +502,20 @@ module MdEditor
         content = body["content"]?.try(&.as_s?)
         base_blob = body["base_blob"]?.try(&.as_s?)
         message = body["message"]?.try(&.as_s?)
+        autosave = body["autosave"]?.try(&.as_bool?) || false
         raise ApiError.new(400, "path and content required") unless path && content
         raise ApiError.new(400, "invalid path (relative .md path, no .. or .git)") unless Git.valid_path?(path)
         raise ApiError.new(400, "bad base_blob") if base_blob && !base_blob.matches?(/^[0-9a-f]{40,64}$/)
 
-        login, name = MdEditor.db.query_one("SELECT login, name FROM users WHERE id = ?",
-          uid, as: {String, String?})
-        author = name.presence || login
+        author, author_email = author_of(uid, repo)
         commit_msg = message.presence || (base_blob ? "Update #{path}" : "Create #{path}")
 
         branch = user_branch(repo)
         base_ref = Git.working_ref(repo[:id], branch)
 
-        author_email = local?(repo) ? "#{login}@local" : "#{login}@users.noreply.#{repo[:provider]}.com"
         blob = Git.commit_file(repo[:id], branch, base_ref, path, content,
-          base_blob, commit_msg, author, author_email)
+          base_blob, commit_msg, author, author_email,
+          autosave_of: autosave && base_blob ? repo[:default_branch] : nil)
 
         json_response(env, 200, {ok: true, blob: blob, branch: branch}.to_json)
       rescue e : Git::Conflict
@@ -514,13 +535,59 @@ module MdEditor
         raise ApiError.new(400, "invalid path (relative .md path, no .. or .git)") unless Git.valid_path?(path)
         raise ApiError.new(400, "bad base_blob") unless base_blob.matches?(/^[0-9a-f]{40,64}$/)
 
-        login, name = MdEditor.db.query_one("SELECT login, name FROM users WHERE id = ?",
-          uid, as: {String, String?})
+        author, author_email = author_of(uid, repo)
         branch = user_branch(repo)
-        author_email = local?(repo) ? "#{login}@local" : "#{login}@users.noreply.#{repo[:provider]}.com"
         Git.commit_file(repo[:id], branch, Git.working_ref(repo[:id], branch), path, nil,
-          base_blob, "Delete #{path}", name.presence || login, author_email)
+          base_blob, "Delete #{path}", author, author_email)
         json_response(env, 200, {ok: true}.to_json)
+      rescue e : Git::Conflict
+        raise ApiError.new(409, "conflict: #{e.message}")
+      rescue e : Git::Error
+        raise ApiError.new(502, "git failed: #{e.message}")
+      end
+
+      # Rename: the slug is the post's URL, so this is deliberate, not automatic.
+      post "/api/repos/:repo_id/post/rename" do |env|
+        uid = require_user(env)
+        repo = repo_owned(env, uid)
+        body = body_json(env)
+        from = body["from"]?.try(&.as_s?)
+        to = body["to"]?.try(&.as_s?)
+        base_blob = body["base_blob"]?.try(&.as_s?)
+        raise ApiError.new(400, "from, to and base_blob required") unless from && to && base_blob
+        raise ApiError.new(400, "invalid path (relative .md path, no .. or .git)") unless Git.valid_path?(from) && Git.valid_path?(to)
+        raise ApiError.new(400, "bad base_blob") unless base_blob.matches?(/^[0-9a-f]{40,64}$/)
+
+        author, author_email = author_of(uid, repo)
+        branch = user_branch(repo)
+        Git.move_file(repo[:id], branch, Git.working_ref(repo[:id], branch), from, to, base_blob,
+          "Rename #{from} to #{to}", author, author_email)
+        json_response(env, 200, {ok: true, path: to}.to_json)
+      rescue e : Git::Conflict
+        raise ApiError.new(409, "conflict: #{e.message}")
+      rescue e : Git::Error
+        raise ApiError.new(502, "git failed: #{e.message}")
+      end
+
+      # Upload an image (raw request body) as a commit. Never overwrites:
+      # returns the path it landed on.
+      post "/api/repos/:repo_id/assets" do |env|
+        uid = require_user(env)
+        repo = repo_owned(env, uid)
+        path = env.params.query["path"]?
+        raise ApiError.new(400, "path required") unless path
+        raise ApiError.new(400, "invalid path") unless Git.valid_blob_path?(path)
+        raise ApiError.new(415, "only images can be uploaded") unless Git.image?(path)
+        io = env.request.body || raise ApiError.new(400, "expected a file body")
+        buf = IO::Memory.new
+        raise ApiError.new(413, "image too large (25 MB max)") if IO.copy(io, buf, MAX_ASSET + 1) > MAX_ASSET
+        raise ApiError.new(400, "empty file") if buf.size == 0
+
+        author, author_email = author_of(uid, repo)
+        branch = user_branch(repo)
+        landed = Git.commit_asset(repo[:id], branch, Git.working_ref(repo[:id], branch), path, buf.to_slice,
+          "Add #{path}", author, author_email)
+        json_response(env, 201, {ok: true, path: landed}.to_json)
       rescue e : Git::Conflict
         raise ApiError.new(409, "conflict: #{e.message}")
       rescue e : Git::Error
@@ -605,8 +672,18 @@ module MdEditor
         branch = user_branch(repo)
         raise ApiError.new(400, "nothing to publish") unless Git.branch_exists?(repo[:id], branch)
 
+        # Take in anything pushed from elsewhere first, so a push only fails
+        # when the two sides genuinely conflict.
+        name, email = author_of(uid, repo)
+        Git.fetch_mirror(repo[:id], url, provider_for(repo).git_auth(token))
+        merged = Git.integrate(repo[:id], branch, repo[:default_branch], name, email)
+        if merged.state == "conflict"
+          next json_response(env, 409, {error: "conflict", conflicts: merged.conflicts}.to_json)
+        end
+
         head = Git.run_head_sha(repo[:id], branch)
         Git.push_mirror(repo[:id], url, "#{branch}:refs/heads/#{repo[:default_branch]}", provider_for(repo).git_auth(token))
+        Git.advance_default(repo[:id], repo[:default_branch], head)
         json_response(env, 200, {ok: true, pushed: head}.to_json)
       rescue e : Git::Error
         raise ApiError.new(409, "push rejected (remote moved?): #{e.message}")
@@ -655,6 +732,7 @@ module MdEditor
           raise ApiError.new(409, "push rejected: #{e.message}")
         end
 
+        Git.advance_default(repo[:id], main, pushed)
         MdEditor.db.exec(
           "UPDATE repos SET provider = ?, full_name = ?, default_branch = ? WHERE id = ?",
           provider_id, full_name, main, repo[:id])

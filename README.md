@@ -2,9 +2,9 @@
 
 (binary/internal name: `md_editor`)
 
-A small, self-hosted markdown editor for git-backed blogs (Zola-style `+++`
-TOML front matter). Sign in with GitHub or GitLab, pick a repo, write — on a
-laptop or one-thumbed on a phone.
+A small, self-hosted editor for Zola sites and other git-backed markdown. Sign
+in with GitHub or GitLab, pick a repo, write — on a laptop or one-thumbed on a
+phone.
 
 - **Every save is a git commit** on your own working branch (`<repo>-user`)
   in a server-side bare mirror. Nothing reaches your remote until you press
@@ -12,9 +12,17 @@ laptop or one-thumbed on a phone.
   (fast-forward only — it never force-pushes).
 - Full per-file history, diffs, and restore (restore = a new commit; history
   is never rewritten).
-- Live-formatted editor (CodeMirror 6), preview, front-matter form, a
-  keyboard-accessory toolbar on phones, local drafts in the browser as a
-  safety net, conflict detection when the file changed elsewhere.
+- The editor shows the post the way it will read: formatted markdown with the
+  syntax appearing only under the cursor, images, and your site's real
+  templates rendered in place (Zola 0.23 components and older shortcodes).
+- Knows Zola: sections from `_index.md`, `sort_by`, page bundles, `static/` and
+  `@/` paths, drafts and scheduled posts, TOML and YAML front matter.
+- Stays in step with the remote: edits and deletions pushed from elsewhere are
+  merged into your working branch; real conflicts ask you to choose.
+- Image upload (file picker, paste, drag) committed beside the post or in
+  `static/`. Large phone photos are scaled down first.
+- Autosave with local drafts as a safety net; a run of typing is one version in
+  the history, not one commit per pause.
 - Local "scratchpads": write without any remote, connect one later.
 - One static binary + a built SPA. State is SQLite + bare git repos in one
   directory. No other services.
@@ -202,7 +210,8 @@ Safety properties worth knowing:
 - Saves are compare-and-swap: if the file or branch changed since you loaded
   it, you get a conflict banner (keep mine / take server version), never a
   silent overwrite.
-- Publish is a normal push — if the remote moved, it's rejected, not forced.
+- Publish is a normal push, never forced. It takes in remote changes first, so
+  it only stops when the same text changed on both sides, and then it asks.
 - The browser also keeps a per-post draft in IndexedDB while you type; if a
   save never landed (offline, tab killed), reopening the post restores it.
 - Removing a repo in the UI deletes its mirror **including unpublished work**
@@ -226,11 +235,12 @@ sudo -u '#1000' git --git-dir=/var/lib/md_editor/repos/1.git log --oneline mysit
   `public_origin` is `https://`. State-changing requests from another site are
   refused (Origin / Sec-Fetch-Site check).
 - Strict CSP (no inline script), `X-Frame-Options: DENY`, `nosniff`, HSTS when
-  on https. The post preview renders raw HTML as text and drops
-  `javascript:`/`data:` links, so a malicious post in a shared repo can't run
-  script.
-- Writes are restricted to relative `.md`/`.markdown` paths (no `..`, no
-  `.git`). Request bodies are capped at 8 MB.
+  on https. Posts and site templates are rendered through DOMPurify: scripts,
+  event handlers, forms and `javascript:` links are removed, so a malicious post
+  or template in a shared repo can't run script. Embeds (`<iframe>`, https only,
+  never same-origin) are sandboxed, and load only in preview, not while typing.
+- Writes are restricted to relative `.md`/`.markdown` paths and images (no `..`,
+  no `.git`). Request bodies are capped at 8 MB, image uploads at 25 MB.
 - The container runs as uid 1000, not root. Publish the port on `127.0.0.1`
   and let the proxy terminate TLS.
 - Logout clears the cookie; sessions are stateless (30 days). To revoke all
@@ -270,14 +280,13 @@ changes.
   rootless.
 - **GitLab "session expired; sign in again"**: the refresh token was revoked
   or the app's secret changed — sign in again.
-- **Publish rejected**: someone pushed to the default branch since your last
-  sync. Your work is safe on `<repo>-user`; merge on the remote side (or
-  locally with plain git against the mirror), then sync.
+- **Publish says files conflict**: the same text changed here and on the remote.
+  Choose which to keep; the other stays in the history. Anything that doesn't
+  overlap merges by itself.
 
 ## Development
 
-See `AGENTS.md` (toolchain paths, e2e harness, design system) and
-`ARCHITECTURE.md`. Short version:
+See `ARCHITECTURE.md` and `docs/DESIGN.md`. Short version:
 
 ```bash
 make check                         # typecheck the Crystal server
@@ -289,6 +298,14 @@ MD_EDITOR_CONFIG=config.toml ./bin/md_editor
 
 `cd frontend && npm run dev` runs Vite with `/api` proxied to `:8099`
 (`MD_EDITOR_API` overrides).
+
+End-to-end checks run against a seeded server on `:8100`:
+
+```bash
+bash scripts/e2e/harness.sh
+uv run --with playwright python scripts/e2e/experience.py    # the whole experience, desktop and phone
+uv run --with playwright python scripts/e2e/zola_parity.py   # preview vs a real `zola build`
+```
 
 ## License
 

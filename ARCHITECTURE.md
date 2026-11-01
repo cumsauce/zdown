@@ -16,8 +16,9 @@ markdown blog editor with git-backed storage and local versioning.
 | Database | SQLite (WAL mode) | Light/zero-ops, fine for public small-scale hosting; schema keeps a provider abstraction so Postgres can come later if needed |
 | Versioning | Git commits as the version log | Every save = commit on the user's working branch; "version tree" UI reads `git log --json`. M2 adds visual tree/diff explorer |
 | Offline safety | Browser-side draft store + explicit sync protocol | IndexedDB draft per post, periodic save, dirty-state banner; sync never blind-overwrites: server compares HEAD and refuses/merges |
-| Zola awareness | Front matter + shortcode detection (M1), shortcode preview render (M2) | Parse `+++` TOML front matter; detect `{% %}` shortcodes and highlight/complete them |
-| Style | switchyard tokens | `#000` canvas, white type, 1px hairlines (`#262626`), zero radius, mono for code/status. Restrained preview type scale (no giant headers) |
+| Zola awareness | Section/page model, real template rendering | `src/zola.cr` snapshots posts, config, shortcode and component templates per commit. `frontend/src/lib/tera.ts` interprets Tera v1 and v2 in the browser (the JS Jinja ports need `new Function`, which the CSP forbids). `scripts/e2e/zola_parity.py` checks the result against a real `zola build` |
+| Remote changes | Integrate into the working branch on sync | A working branch used to stay frozen at its fork point, so remote edits and deletions never appeared and publish failed. `Git.integrate`: fast-forward, else `merge-tree`; a real conflict moves nothing until the user picks a side |
+| Style | Paper & ink, see `docs/DESIGN.md` | Light and dark from one set of CSS variables; system UI type, Newsreader for writing |
 | Image CI | Actions multi-arch on **native runners**, per-arch digests merged into one manifest | QEMU-emulated static `--release` Crystal builds are unusably slow, so amd64/arm64 each build natively (amd64: `ubuntu-24.04`, arm64: `ubuntu-24.04-arm`) and push by digest; `merge` reassembles via `buildx imagetools create`. `main` ships `latest`/`sha-*`, `v*` git tags ship semver tags — keep tag = `shard.yml` version. Image: `ghcr.io/cumsauce/zdown` |
 
 ## Data flow
@@ -59,16 +60,18 @@ POST /api/repos                       → { provider, repo_full_name } → mirro
 DELETE /api/repos/:id                 → unregister + delete mirror
 POST /api/repos/:id/sync              → fetch --prune; returns new head
 
-GET  /api/repos/:id/posts             → list markdown posts (path, title, front matter, mtime)
-GET  /api/posts/:id                   → { path, content, front_matter, head_sha, dirty }
-POST /api/posts/:id/content           → { base_sha, content } → verify head == base_sha,
-                                        commit on user branch; 409 on mismatch (never blind-overwrite)
-POST /api/posts/:id/restore           → { sha } → checkout content from old commit as new commit
-GET  /api/posts/:id/versions          → git log --json for that path
-GET  /api/repos/:id/diff?range=a..b   → unified diff for version views
-POST /api/uploads/:repo_id            → image upload → stored under assets dir, committed, returns path
-
-GET  /api/repos/:id/publish           → push user branch to remote (M1: explicit button)
+GET  /api/repos/:id/posts             → { head, posts, site, status }: local mirror only, cached per commit
+POST /api/repos/:id/sync?resolve=     → fetch + integrate → { state, conflicts, moved }
+GET  /api/repos/:id/post?path=        → { path, blob, content, … }
+POST /api/repos/:id/post/content      → { path, content, base_blob, autosave } → CAS commit; 409 on mismatch
+POST /api/repos/:id/post/rename       → { from, to, base_blob } (a bundle moves with its assets)
+DELETE /api/repos/:id/post?path&base_blob
+GET  /api/repos/:id/post/versions?path=
+GET  /api/repos/:id/post/content_at?sha&path
+GET  /api/repos/:id/diff?range&path
+GET  /api/repos/:id/raw?path=         → an image at the working ref
+POST /api/repos/:id/assets?path=      → raw image body → commit, returns the path it landed on
+POST /api/repos/:id/publish           → fetch, integrate, push; 409 { conflicts } if the sides overlap
 ```
 
 ## Offline/recovery protocol (reliability)

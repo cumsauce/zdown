@@ -1,21 +1,20 @@
 import { useEffect, useState } from 'react';
-import { styled } from 'baseui';
-import { Button, KIND, SIZE } from 'baseui/button';
+import { styled } from 'styletron-react';
 import { api, errorMessage, type Version } from '../api';
 import { relTime, shortSha } from '../lib/time';
-import { tokens } from '../theme';
+import { HOVER, PHONE, tokens } from '../theme';
 import { DiffView } from './DiffView';
-import { CardHead, CardTitle, ErrorText, Full, Hint, Panel, Row } from './ui';
+import { Btn, Grow, Muted, Spinner } from './ui';
 
 // git's well-known empty tree: the left side when diffing a file's first version
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
 const Layout = styled('div', {
   display: 'grid',
-  gridTemplateColumns: 'minmax(260px, 340px) minmax(0, 1fr)',
-  gap: '16px',
+  gridTemplateColumns: 'minmax(240px, 320px) minmax(0, 1fr)',
+  gap: '24px',
   alignItems: 'start',
-  '@media (max-width: 639px)': { gridTemplateColumns: 'minmax(0, 1fr)' },
+  [PHONE]: { gridTemplateColumns: 'minmax(0, 1fr)' },
 });
 
 const Commit = styled<'button', { $active: boolean }>('button', ({ $active }) => ({
@@ -26,19 +25,25 @@ const Commit = styled<'button', { $active: boolean }>('button', ({ $active }) =>
   width: '100%',
   textAlign: 'left',
   cursor: 'pointer',
-  padding: '10px 16px',
+  padding: '10px 10px',
   border: 'none',
-  borderBottom: `1px solid ${tokens.rowRule}`,
+  borderRadius: '8px',
   backgroundColor: $active ? tokens.active : 'transparent',
-  boxShadow: $active ? `inset 2px 0 0 ${tokens.accent}` : 'none',
-  color: tokens.fgSoft,
-  fontSize: '13px',
-  fontFamily: 'inherit',
-  ':hover': { backgroundColor: $active ? tokens.active : tokens.hover },
+  color: tokens.fg,
+  fontSize: '14px',
+  [HOVER]: { ':hover': { backgroundColor: $active ? tokens.active : tokens.hover } },
 }));
 
-const Sha = styled('span', { fontFamily: tokens.mono, fontSize: '11px', color: tokens.accent });
-const Meta = styled('span', { fontFamily: tokens.mono, fontSize: '11px', color: tokens.fgMuted });
+const Diff = styled('div', { minWidth: 0, border: `1px solid ${tokens.rule}`, borderRadius: '10px', overflow: 'hidden' });
+
+const describe = (subject: string) => {
+  if (/^Update /.test(subject)) return 'Edited';
+  if (/^Create /.test(subject)) return 'Created';
+  if (/^Revert /.test(subject)) return 'Restored an earlier version';
+  if (/^Rename /.test(subject)) return 'Renamed';
+  if (/^Merge /.test(subject)) return 'Merged changes from the remote';
+  return subject;
+};
 
 export function VersionHistory({ repoId, path, versions, restoring, onRestore }: {
   repoId: number;
@@ -47,7 +52,7 @@ export function VersionHistory({ repoId, path, versions, restoring, onRestore }:
   restoring: boolean;
   onRestore(v: Version): Promise<boolean>;
 }) {
-  const [sel, setSel] = useState<Version | null>(null);
+  const [sel, setSel] = useState<Version | null>(versions[0] ?? null);
   const [diff, setDiff] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -65,46 +70,34 @@ export function VersionHistory({ repoId, path, versions, restoring, onRestore }:
     return () => { cancelled = true; };
   }, [sel, versions, repoId, path]);
 
+  if (versions.length === 0) return <Muted>No versions of this file yet.</Muted>;
+
+  const isHead = sel?.sha === versions[0]?.sha;
   return (
     <Layout>
-      <Panel style={{ padding: 0 }}>
-        <CardHead>
-          <CardTitle>Versions</CardTitle>
-          <Hint>{versions.length}</Hint>
-        </CardHead>
-        {versions.length === 0 && <div style={{ padding: 16 }}><Hint>no commits touch this file yet</Hint></div>}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
         {versions.map((v, i) => (
-          <Commit key={v.sha} $active={sel?.sha === v.sha} onClick={() => setSel(v)}>
-            <span>{v.subject}</span>
-            <Row style={{ gap: 8 }}>
-              <Sha>{shortSha(v.sha)}</Sha>
-              <Meta>{relTime(v.time)} · {v.author}{i === 0 ? ' · head' : ''}</Meta>
-            </Row>
+          <Commit key={v.sha} type="button" $active={sel?.sha === v.sha} onClick={() => setSel(v)}>
+            <span>{describe(v.subject)}{i === 0 ? ' (current)' : ''}</span>
+            <Muted>{relTime(v.time)} · {v.author}</Muted>
           </Commit>
         ))}
-      </Panel>
-      <Panel style={{ padding: 0, minWidth: 0 }}>
-        {sel ? (
-          <>
-            <Row style={{ padding: '12px 16px', borderBottom: `1px solid ${tokens.border}`, minHeight: 52 }}>
-              <Sha>{shortSha(sel.sha)}</Sha>
-              <Meta>{sel.subject}</Meta>
-              <Full />
-              <Button size={SIZE.mini} kind={KIND.secondary} isLoading={restoring}
-                onClick={() => void onRestore(sel).then((ok) => { if (ok) { setSel(null); setDiff(null); } })}>
-                restore this version
-              </Button>
-            </Row>
-            <div style={{ padding: '12px 0' }}>
-              {busy && <div style={{ padding: '0 12px' }}><Hint>computing diff…</Hint></div>}
-              {err && <div style={{ padding: '0 12px' }}><ErrorText>{err}</ErrorText></div>}
-              {diff !== null && (diff ? <DiffView diff={diff} /> : <div style={{ padding: '0 12px' }}><Hint>no changes to this file</Hint></div>)}
-            </div>
-          </>
-        ) : (
-          <div style={{ padding: '32px 16px', textAlign: 'center' }}><Hint>select a commit to see what changed</Hint></div>
-        )}
-      </Panel>
+      </div>
+      {sel && (
+        <Diff>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: `1px solid ${tokens.rule}`, flexWrap: 'wrap' }}>
+            <Grow><Muted>{shortSha(sel.sha)} · {new Date(sel.time * 1000).toLocaleString()}</Muted></Grow>
+            {!isHead && (
+              <Btn small loading={restoring} onClick={() => void onRestore(sel).then((ok) => { if (ok) { setSel(null); setDiff(null); } })}>Restore this version</Btn>
+            )}
+          </div>
+          <div style={{ padding: '10px 0' }}>
+            {busy && <div style={{ padding: '0 14px' }}><Spinner size={14} /></div>}
+            {err && <div style={{ padding: '0 14px', color: tokens.negative, fontSize: 13 }}>{err}</div>}
+            {diff !== null && (diff ? <DiffView diff={diff} /> : <div style={{ padding: '0 14px' }}><Muted>No changes to this file.</Muted></div>)}
+          </div>
+        </Diff>
+      )}
     </Layout>
   );
 }

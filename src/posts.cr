@@ -1,8 +1,10 @@
 require "json"
 require "toml"
 
+require "yaml"
+
 # Zola-aware parsing: front matter split-out, title extraction, shortcode
-# detection (detection + highlighting in M1; rendering in M2).
+# detection, and the page/section fields the site browser sorts and badges by.
 module MdEditor
   module Posts
     extend self
@@ -37,6 +39,53 @@ module MdEditor
     BLOCK_SHORTCODE  = /\{%\s*([A-Za-z_]\w*)\s*(?:\(|%\})/
     NON_SHORTCODES   = %w[end else]
 
+    # What the site browser needs per file. Values are read off the raw lines
+    # (dates stay "2026-01-04" as written, not a server-timezone timestamp).
+    record Meta, date : String?, updated : String?, draft : Bool, description : String?,
+      weight : Int64?, sort_by : String?, transparent : Bool, render : Bool
+
+    # Top-level `key = value` / `key: value` lines, stopping at the first table.
+    def top_level_fields(raw : String) : Hash(String, String)
+      fields = {} of String => String
+      raw.each_line do |line|
+        break if line.starts_with?('[')
+        if m = line.match(/^\s*"?([A-Za-z_][\w-]*)"?\s*[=:]\s*(.+?)\s*$/)
+          fields[m[1]] ||= unquote(m[2])
+        end
+      end
+      fields
+    end
+
+    private def unquote(v : String) : String
+      if v.size >= 2 && ((v.starts_with?('"') && v.ends_with?('"')) || (v.starts_with?('\'') && v.ends_with?('\'')))
+        return v[1...-1].gsub("\\\"", "\"").gsub("\\\\", "\\")
+      end
+      v.sub(/\s+#.*$/, "")
+    end
+
+    # The raw front matter text and which fence it used (+++ TOML, --- YAML).
+    def front_matter_text(content : String) : {String, String}?
+      {"+++", "---"}.each do |fence|
+        next unless content.starts_with?(fence)
+        if idx = content.index("\n#{fence}", fence.size)
+          return {fence, content[fence.size...idx]}
+        end
+      end
+      nil
+    end
+
+    DATED_FILE = /(?:^|\/)(\d{4}-\d{2}-\d{2})[-_][^\/]+$/
+
+    def meta(content : String, path : String) : Meta
+      fm = front_matter_text(content)
+      f = fm ? top_level_fields(fm[1]) : {} of String => String
+      # like Zola: no `date` key, but a date-prefixed filename (or bundle dir)
+      from_name = path.sub(/\/index\.(md|markdown)$/i, "").match(DATED_FILE).try(&.[1])
+      date = f["date"]?.try { |d| d.match(/^\d{4}-\d{2}-\d{2}(?:[T ][\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)?/).try(&.[0]) } || from_name
+      Meta.new(date, f["updated"]?, f["draft"]? == "true", f["description"]?,
+        f["weight"]?.try(&.to_i64?), f["sort_by"]?, f["transparent"]? == "true", f["render"]? != "false")
+    end
+
     def shortcodes_in(body : String) : Array(String)
       names = [] of String
       body.scan(INLINE_SHORTCODE) { |m| names << m[1] }
@@ -51,20 +100,28 @@ module MdEditor
       body = content
       valid = false
 
-      if content.starts_with?("+++")
-        if idx = content.index("\n+++")
-          raw_toml = content[3...idx]
-          body = content[(idx + 4)..].lstrip('\n')
+      yaml_title = nil
+      if text = front_matter_text(content)
+        fence, raw = text
+        body = content[(fence.size + raw.size + 4)..].lstrip('\r').lstrip('\n')
+        if fence == "+++"
           begin
-            fm = TOML.parse(raw_toml)
+            fm = TOML.parse(raw)
             valid = true
           rescue e : TOML::ParseException
             valid = false
           end
+        else
+          begin
+            valid = !YAML.parse(raw).raw.nil?
+          rescue e : YAML::ParseException
+            valid = false
+          end
+          yaml_title = top_level_fields(raw)["title"]? if valid
         end
       end
 
-      title = fm.try(&.dig?("title")).try(&.as_s?)
+      title = fm.try(&.dig?("title")).try(&.as_s?) || yaml_title
       title ||= first_heading(body) unless body.empty?
 
       shortcodes = shortcodes_in(body)

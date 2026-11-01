@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
-import { Spinner } from 'baseui/spinner';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, errorMessage, type Version } from '../api';
+import { Icon } from '../components/icons';
 import { VersionHistory } from '../components/VersionHistory';
-import { ErrorText, MonoText, Page, PageHeader } from '../components/ui';
+import { Banner, confirmDialog, H1, Loading, Page, Path, quietLink, styled } from '../components/ui';
+import { siteStore } from '../lib/store';
 import { notifyError, notifyOk } from '../notify';
-import { shortSha } from '../lib/time';
-import { tokens } from '../theme';
+import { relTime, shortSha } from '../lib/time';
+
+const BackLink = styled(Link, { ...quietLink, marginLeft: '-4px', alignSelf: 'flex-start' });
 
 export function Versions() {
   const repoId = Number(useParams().repoId);
@@ -22,12 +24,18 @@ export function Versions() {
 
   // Restore = a new commit with the old content; history is never rewritten.
   const restore = async (v: Version) => {
-    if (!window.confirm(`restore ${path} to ${shortSha(v.sha)}?\nthe current content stays in history.`)) return false;
+    const ok = await confirmDialog({
+      title: 'Restore this version?',
+      body: `The post goes back to how it was ${relTime(v.time)}. The current text stays in the history.`,
+      action: 'Restore',
+    });
+    if (!ok) return false;
     setRestoring(true);
     try {
       const [old, cur] = await Promise.all([api.contentAt(repoId, v.sha, path), api.post(repoId, path)]);
       await api.save(repoId, { path, content: old.content, base_blob: cur.blob, message: `Revert ${path} to ${shortSha(v.sha)}` });
-      notifyOk(`restored ${shortSha(v.sha)}`);
+      notifyOk('Restored');
+      void siteStore.load(repoId);
       load();
       return true;
     } catch (e) { notifyError(e); return false; }
@@ -35,12 +43,15 @@ export function Versions() {
   };
 
   return (
-    <Page style={{ maxWidth: 1200 }}>
-      <PageHeader
-        back={{ to: `/repos/${repoId}/edit?path=${encodeURIComponent(path)}`, label: 'back to editor' }}
-        title="History"
-        meta={<MonoText style={{ fontSize: 11, color: tokens.fgMuted }}>{path}</MonoText>} />
-      {error ? <ErrorText>{error}</ErrorText> : versions === null ? <Spinner $size="24px" /> : (
+    <Page style={{ maxWidth: 1040 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <BackLink to={`/repos/${repoId}/edit?path=${encodeURIComponent(path)}`}>
+          <Icon name="back" size={17} />Back to the post
+        </BackLink>
+        <H1>History</H1>
+        <Path>{path}</Path>
+      </div>
+      {error ? <Banner $tone="negative" style={{ borderRadius: 8 }}>{error}</Banner> : versions === null ? <Loading /> : (
         <VersionHistory repoId={repoId} path={path} versions={versions} restoring={restoring} onRestore={restore} />
       )}
     </Page>

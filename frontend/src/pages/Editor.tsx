@@ -1,35 +1,33 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { styled } from 'baseui';
-import { Button, KIND, SIZE } from 'baseui/button';
-import { Spinner } from 'baseui/spinner';
-import { api, ApiError, errorMessage, type Repo } from '../api';
-import { CodeMirror, type CodeMirrorHandle, type SelectionBox } from '../components/CodeMirror';
-import { FormatPopover } from '../components/FormatPopover';
-import { FrontMatterSheet } from '../components/FrontMatterSheet';
-import { MobileToolbar } from '../components/MobileToolbar';
-import { Preview } from '../components/Preview';
-import { NavButton } from '../components/AppShell';
-import { recents } from '../lib/recents';
-import { Banner, Center, ErrorText, Full } from '../components/ui';
-import { StatefulPopover, PLACEMENT } from 'baseui/popover';
-import { StatefulMenu } from 'baseui/menu';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { styled } from 'styletron-react';
+import { api, ApiError, errorMessage } from '../api';
+import { CodeMirror, type EditorHandle } from '../components/editor/CodeMirror';
+import { InsertSheet } from '../components/editor/InsertSheet';
+import { PostSettings } from '../components/editor/PostSettings';
+import { Toolbar } from '../components/editor/Toolbar';
+import { Icon } from '../components/icons';
+import { ConflictBox, PublishSheet } from '../components/Publish';
+import { Badge, Banner, Btn, Center, confirmDialog, Grow, IconBtn, Loading, Menu, type MenuItem, Muted, Select, Spinner } from '../components/ui';
 import { drafts, type Draft } from '../lib/drafts';
-import { splitFrontMatter, tryParseToml } from '../lib/frontmatter';
+import { dateText, parseFields, setField, splitDoc, today } from '../lib/frontmatter';
+import { editUrl, recents } from '../lib/recents';
+import { type RenderCtx } from '../lib/render';
+import { formatDate, isFuture, newPostPath, slugify, uploadTarget, usesBundles, defaultSection } from '../lib/site';
+import { siteStore, useRepos, useSite } from '../lib/store';
 import { clock } from '../lib/time';
+import { prepareImage } from '../lib/upload';
 import { notifyError, notifyOk } from '../notify';
-import { tokens } from '../theme';
+import { COARSE, DESKTOP, HOVER, PHONE, tokens } from '../theme';
 
-// One header at every size (iA Writer/Bear): title · state · ⚙ · preview ·
-// save · ⋯. Secondary actions live in the ⋯ menu. WIDE only decides
-// whether post settings dock beside the text or cover it.
-const NotPhone = styled('span', { display: 'contents', '@media (max-width: 639px)': { display: 'none' } });
-const WIDE = '@media (min-width: 1100px)';
-const COMPACT = '@media (max-width: 1099px)';
-const PHONE = '@media (max-width: 639px)';
+const Preview = lazy(() => import('../components/Preview').then((m) => ({ default: m.Preview })));
 
-// Pinned to the *visual* viewport so the formatting bar rides above the
-// on-screen keyboard on iOS/Android instead of hiding behind it.
+// One writing surface for every file, new or old: it never changes shape when
+// you start typing, when the file gets created, or between screen sizes. The
+// title is a real field that writes to front matter, the body is live markdown,
+// and saving is automatic. The raw +++ block stays out of the way.
+
+/** Pinned to the *visual* viewport so the toolbar rides above the on-screen keyboard. */
 const Shell = styled('div', {
   position: 'fixed',
   left: 'var(--nav-w, 0px)',
@@ -38,107 +36,150 @@ const Shell = styled('div', {
   flexDirection: 'column',
   minHeight: 0,
   backgroundColor: tokens.bg,
+  zIndex: 10,
 });
 
 const Bar = styled('header', {
-  height: '48px',
-  padding: '0 12px',
+  height: '52px',
+  padding: '0 8px',
   display: 'flex',
   alignItems: 'center',
-  gap: '8px',
-  borderBottom: `1px solid ${tokens.border}`,
+  gap: '2px',
   flexShrink: 0,
   minWidth: 0,
-  '& button': { whiteSpace: 'nowrap', flexShrink: 0 },
-  [PHONE]: { padding: '0 4px', gap: '4px' },
+  paddingTop: 'env(safe-area-inset-top)',
+  boxSizing: 'content-box',
+  [PHONE]: { padding: '0 2px' },
 });
 
-const TitleBlock = styled('div', { display: 'flex', flexDirection: 'column', minWidth: 0, flex: '0 1 auto' });
-
-const DocTitle = styled('span', {
-  fontSize: '13px',
-  fontWeight: 600,
-  color: tokens.fg,
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-  whiteSpace: 'nowrap',
+const Back = styled(Link, {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '2px',
+  height: '36px',
+  padding: '0 10px 0 4px',
+  borderRadius: '8px',
+  fontSize: '14px',
+  color: tokens.fgMuted,
+  minWidth: 0,
+  flexShrink: 1,
+  [HOVER]: { ':hover': { backgroundColor: tokens.hover, color: tokens.fg } },
+  [COARSE]: { height: '44px' },
 });
 
-const DocPath = styled('span', {
-  fontFamily: tokens.mono,
-  fontSize: '11px',
-  color: tokens.fgFaint,
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-  whiteSpace: 'nowrap',
-  [PHONE]: { display: 'none' },
-});
+const BackLabel = styled('span', { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' });
 
 const SaveState = styled('span', {
   display: 'flex',
   alignItems: 'center',
-  gap: '6px',
-  fontFamily: tokens.mono,
-  fontSize: '11px',
-  color: tokens.fgMuted,
-  whiteSpace: 'nowrap',
-  flexShrink: 0,
-});
-
-const DirtyDot = styled<'span', { $saved: boolean }>('span', ({ $saved }) => ({
-  width: '7px',
-  height: '7px',
-  borderRadius: '50%',
-  flexShrink: 0,
-  backgroundColor: $saved ? tokens.borderStrong : tokens.warning,
-}));
-
-const StateLabel = styled('span', { [PHONE]: { display: 'none' } });
-
-
-const Status = styled('footer', {
-  display: 'flex',
-  alignItems: 'center',
-  gap: '12px',
-  padding: '5px 14px',
-  borderTop: `1px solid ${tokens.border}`,
-  fontFamily: tokens.mono,
-  fontSize: '11px',
-  color: tokens.fgMuted,
-  flexShrink: 0,
-  [PHONE]: { display: 'none' },
-});
-
-
-const Body = styled('div', { flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden', position: 'relative' });
-
-/** Post settings: docked right on wide screens, a full-screen sheet below. */
-const SettingsPane = styled('aside', {
-  display: 'flex',
-  flexDirection: 'column',
-  backgroundColor: tokens.codeBg,
-  overflowY: 'auto',
-  [WIDE]: { width: '360px', flexShrink: 0, borderLeft: `1px solid ${tokens.border}` },
-  [COMPACT]: { position: 'absolute', inset: 0, zIndex: 20 },
-});
-
-const PaneHead = styled('div', {
-  display: 'flex',
-  alignItems: 'center',
-  gap: '8px',
-  padding: '12px 16px',
-  borderBottom: `1px solid ${tokens.border}`,
+  gap: '5px',
   fontSize: '13px',
+  color: tokens.fgFaint,
+  whiteSpace: 'nowrap',
+  padding: '0 8px',
+  flexShrink: 0,
+});
+
+const Body = styled('div', { flex: 1, minHeight: 0, display: 'flex', position: 'relative' });
+
+const Scroller = styled('div', {
+  flex: 1,
+  minWidth: 0,
+  overflowY: 'auto',
+  overscrollBehavior: 'contain',
+  WebkitOverflowScrolling: 'touch',
+});
+
+const Column = styled('div', {
+  maxWidth: '680px',
+  margin: '0 auto',
+  padding: '20px 32px 45vh',
+  [PHONE]: { padding: '8px 20px 45vh' },
+});
+
+const TitleField = styled('textarea', {
+  display: 'block',
+  width: '100%',
+  border: 'none',
+  outline: 'none',
+  background: 'none',
+  resize: 'none',
+  padding: 0,
+  margin: 0,
+  overflow: 'hidden',
+  fontFamily: tokens.serif,
+  fontSize: '40px',
+  fontWeight: 500,
+  lineHeight: 1.12,
+  letterSpacing: '-.012em',
+  color: tokens.fg,
+  '::placeholder': { color: tokens.fgFaint },
+  ':focus-visible': { outline: 'none' },
+  [PHONE]: { fontSize: '32px !important' },
+  [COARSE]: { fontSize: '32px !important' },
+});
+
+const MetaLine = styled('div', {
+  display: 'flex',
+  alignItems: 'center',
+  flexWrap: 'wrap',
+  gap: '4px 8px',
+  margin: '10px 0 26px',
+  minHeight: '24px',
+  fontSize: '14px',
+  color: tokens.fgMuted,
+});
+
+const MetaBtn = styled('button', {
+  appearance: 'none',
+  border: 'none',
+  background: 'none',
+  padding: '2px 0',
+  fontSize: '14px',
+  color: tokens.fgMuted,
+  cursor: 'pointer',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '6px',
+  [HOVER]: { ':hover': { color: tokens.fg } },
+  [COARSE]: { minHeight: '44px' },
+});
+
+const Side = styled('aside', {
+  position: 'absolute',
+  inset: 0,
+  zIndex: 20,
+  backgroundColor: tokens.bg,
+  overflowY: 'auto',
+  overscrollBehavior: 'contain',
+  padding: '4px 20px 40px',
+  '@media (min-width: 1100px)': {
+    position: 'static',
+    width: '340px',
+    flexShrink: 0,
+    borderLeft: `1px solid ${tokens.rule}`,
+    padding: '0 20px 40px',
+  },
+});
+
+const SideHead = styled('div', {
+  display: 'flex',
+  alignItems: 'center',
+  height: '44px',
+  fontSize: '15px',
   fontWeight: 600,
   color: tokens.fg,
   position: 'sticky',
   top: 0,
-  backgroundColor: tokens.codeBg,
+  backgroundColor: tokens.bg,
   zIndex: 1,
+  margin: '0 -8px 6px 0',
 });
 
+const OnlyDesktop = styled('span', { display: 'none', [DESKTOP]: { display: 'contents' } });
+
 function useVisualViewport() {
-  const [box, setBox] = useState({ top: 0, height: typeof window === 'undefined' ? 0 : window.innerHeight });
+  const [box, setBox] = useState(() => ({ top: 0, height: window.innerHeight }));
   useEffect(() => {
     const vv = window.visualViewport;
     const update = () => setBox(vv ? { top: vv.offsetTop, height: vv.height } : { top: 0, height: window.innerHeight });
@@ -157,77 +198,118 @@ function useVisualViewport() {
 
 interface DraftOffer extends Draft { applied: boolean }
 
-function templateFor(path: string) {
-  const name = path.split('/').pop()!.replace(/\.md$/i, '').replace(/[-_]+/g, ' ');
-  const today = new Date().toISOString().slice(0, 10);
-  return `+++\ntitle = ${JSON.stringify(name)}\ndate = ${today}\n+++\n\n`;
-}
-
-const wordCount = (content: string) => {
-  const body = splitFrontMatter(content).body.trim();
-  return body ? body.split(/\s+/).length : 0;
+const wordCount = (body: string) => {
+  const t = body.trim();
+  return t ? t.split(/\s+/).length : 0;
 };
 
-export function Editor() {
+function template(title: string, isZola: boolean) {
+  const lines = [`title = ${JSON.stringify(title)}`, `date = ${today()}`];
+  if (isZola) lines.push('draft = true');
+  return `+++\n${lines.join('\n')}\n+++\n\n`;
+}
+
+/** Stable identity across "new post" becoming a real file, so nothing remounts. */
+export function EditorRoute() {
   const repoId = Number(useParams().repoId);
   const [params] = useSearchParams();
+  const loc = useLocation();
   const path = params.get('path') ?? '';
+  const key = useRef('');
+  const adopted = (loc.state as { adopted?: boolean } | null)?.adopted;
+  if (!adopted || !key.current) key.current = `${repoId}:${path}:${params.get('new') ?? ''}:${params.get('in') ?? ''}:${path ? '' : loc.key}`;
+  return <Editor key={key.current} />;
+}
+
+function Editor() {
+  const repoId = Number(useParams().repoId);
+  const [params] = useSearchParams();
+  const urlPath = params.get('path') ?? '';
   const isNew = params.get('new') === '1';
   const navigate = useNavigate();
+  const loc = useLocation();
 
-  const [repo, setRepo] = useState<Repo | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const repos = useRepos();
+  const repo = repos?.find((r) => r.id === repoId);
+  const siteState = useSite(repoId, repo);
+  const site = siteState.data?.site ?? null;
+  const tree = siteState.tree;
+  const local = repo?.provider === 'local';
+
+  const [path, setPath] = useState(urlPath);
+  const [dir, setDir] = useState<string | null>(params.get('in'));
+  const [loading, setLoading] = useState(!isNew || !!urlPath);
+  const [loadError, setLoadError] = useState<{ message: string; gone: boolean } | null>(null);
   const [content, setContent] = useState('');
-  const [server, setServer] = useState<string | null>(null); // committed text; null = file doesn't exist yet
+  const [server, setServer] = useState<string | null>(null); // committed text; null = no such file yet
   const [baseBlob, setBaseBlob] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
-  const [publishing, setPublishing] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   const [offer, setOffer] = useState<DraftOffer | null>(null);
   const [tab, setTab] = useState<'write' | 'preview'>('write');
-  const [marks, setMarks] = useState(true);
-  const [sheet, setSheet] = useState(false);
+  const [marks, setMarks] = useState(() => { try { return localStorage.getItem('zdown.marks') === '1'; } catch { return false; } });
+  const [panel, setPanel] = useState(false);
+  const [insert, setInsert] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [uploading, setUploading] = useState(0);
+  const [focused, setFocused] = useState(false);
 
-  const editor = useRef<CodeMirrorHandle>(null);
-  const dirty = server === null || content !== server;
+  const editor = useRef<EditorHandle>(null);
+  const titleRef = useRef<HTMLTextAreaElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const dirty = server === null ? path !== '' || content.trim() !== '' : content !== server;
+  const pendingNew = !path;
+
+  const doc = useMemo(() => splitDoc(content), [content]);
+  const fields = useMemo(() => parseFields(doc), [doc.raw, doc.format]); // eslint-disable-line react-hooks/exhaustive-deps
+  const titleValue = fields && typeof fields.title === 'string' ? fields.title : '';
+  const isSection = /(^|\/)_index\.[a-z-.]+$/i.test(path);
+  const draftKey = path || `new:${dir ?? ''}`;
 
   // refs so the save queue always sees the latest values
-  const live = useRef({ content, baseBlob, server, conflict });
-  live.current = { content, baseBlob, server, conflict };
+  const live = useRef({ content, baseBlob, server, conflict, path });
+  live.current = { content, baseBlob, server, conflict, path };
   const inflight = useRef<Promise<void> | null>(null);
   const again = useRef(false);
   const userEdited = useRef(false);
-  const [selBox, setSelBox] = useState<SelectionBox | null>(null);
-  const finePointer = useMemo(() => window.matchMedia('(pointer: fine)').matches, []);
-  // Handoff from the Home composer: text typed after the file was created
-  // (`pending`) and a request to continue typing at the end.
-  const handoff = useLocation().state as { pending?: string; focusEnd?: boolean } | null;
-  const handoffRef = useRef(handoff);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   // ---------- load ----------
-  const fetchServer = useCallback(async () => {
+  const fetchServer = useCallback(async (p: string) => {
     try {
-      const p = await api.post(repoId, path);
-      return { content: p.content, blob: p.blob as string | null };
+      const r = await api.post(repoId, p);
+      return { content: r.content, blob: r.blob };
     } catch (e) {
       if (e instanceof ApiError && e.status === 404 && isNew) return { content: null, blob: null };
       throw e;
     }
-  }, [repoId, path, isNew]);
+  }, [repoId, isNew]);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
     (async () => {
-      try {
-        const [repos, s, d] = await Promise.all([api.repos(), fetchServer(), drafts.get(repoId, path)]);
+      if (!urlPath) {
+        // a new post lives only on this device until it has a name
+        const d = await drafts.get(repoId, draftKey);
         if (cancelled) return;
-        setRepo(repos.find((r) => r.id === repoId) ?? null);
+        const pending = (loc.state as { body?: string } | null)?.body;
+        const start = d?.content ?? (pending ? `+++\ntitle = ""\ndate = ${today()}\n+++\n\n${pending}` : '');
+        setContent(start);
+        setLoading(false);
+        return;
+      }
+      try {
+        const [s, d] = await Promise.all([fetchServer(urlPath), drafts.get(repoId, urlPath)]);
+        if (cancelled) return;
         setServer(s.content);
         setBaseBlob(s.blob);
-        const committed = s.content ?? templateFor(path);
+        const committed = s.content ?? '';
         if (d && d.content !== committed) {
           // the local draft wins on reopen; the banner offers the way back
           setContent(d.content);
@@ -236,78 +318,165 @@ export function Editor() {
         } else {
           setContent(committed);
         }
-        const pending = handoffRef.current?.pending;
-        if (pending != null && pending !== committed) { userEdited.current = true; setContent(pending); }
         setLoadError(null);
       } catch (e) {
-        if (!cancelled) setLoadError(errorMessage(e));
+        if (!cancelled) setLoadError({ message: errorMessage(e), gone: e instanceof ApiError && e.status === 404 });
       } finally {
         if (!cancelled) setLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [repoId, path, fetchServer]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
+  // The remote moved while this was open and nothing here has been touched: follow it.
+  const lastSyncedAt = siteState.syncedAt;
   useEffect(() => {
-    if (loading || !handoffRef.current?.focusEnd) return;
-    handoffRef.current = null;
-    requestAnimationFrame(() => editor.current?.focusEnd());
-  }, [loading]);
+    // (a restored draft counts as touched: it must never be swapped out from under you)
+    if (!path || loading || userEdited.current || dirty || !lastSyncedAt) return;
+    const known = siteState.data?.posts.find((p) => p.path === path);
+    if (known && baseBlob && known.blob !== baseBlob) {
+      void fetchServer(path).then((s) => {
+        if (userEdited.current || live.current.content !== live.current.server) return;
+        setServer(s.content);
+        setBaseBlob(s.blob);
+        setContent(s.content ?? '');
+      }, () => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [siteState.data?.head]);
 
-  // ---------- drafts (debounced, only while dirty) ----------
-  useEffect(() => {
-    if (loading || !dirty || !userEdited.current) return;
-    const t = setTimeout(() => {
-      void drafts.put(repoId, path, { content, baseBlob: live.current.baseBlob, savedAt: Date.now() });
-    }, 250);
-    return () => clearTimeout(t);
-  }, [content, dirty, loading, repoId, path]);
+  // ---------- saving ----------
 
-  // ---------- save (serialized; a save requested mid-flight re-runs after) ----------
-  const save = useCallback(async (): Promise<void> => {
+  // The first save names the file, so a slug isn't derived from half a title.
+  const nameFile = useCallback((text: string): string | null => {
+    const parts = splitDoc(text);
+    const f = parseFields(parts);
+    const title = f && typeof f.title === 'string' ? f.title : '';
+    let slug = slugify(title);
+    if (!slug && local) slug = slugify(parts.body.trim().split('\n')[0] ?? '');
+    if (!slug || (dir === null && !tree)) return null;
+    const section = dir !== null ? dir : tree ? defaultSection(tree).dir : '';
+    const node = tree?.byDir.get(section);
+    return newPostPath(section, slug, node ? usesBundles(node) : false);
+  }, [dir, tree, local]);
+
+  const save = useCallback(async (manual = false): Promise<void> => {
     if (inflight.current) { again.current = true; return inflight.current; }
     const run = async () => {
-      const { content: text, baseBlob: base, server: committed, conflict: c } = live.current;
+      const { content: text, baseBlob: base, server: committed, conflict: c, path: current } = live.current;
       if (c || (committed !== null && text === committed)) return;
       setSaving(true);
       try {
-        const r = await api.save(repoId, { path, content: text, base_blob: base ?? undefined });
+        let target = current;
+        if (!target) {
+          const named = nameFile(text);
+          if (!named) return; // still waiting for a title
+          // never overwrite: bump the name until it's free
+          target = named;
+          for (let n = 2; siteStore.get(repoId).data?.posts.some((p) => p.path === target); n++) {
+            target = named.includes('/index.') ? named.replace(/\/index\./, `-${n}/index.`) : named.replace(/\.md$/, `-${n}.md`);
+          }
+        }
+        const r = await api.save(repoId, { path: target, content: text, base_blob: base ?? undefined, autosave: !manual });
         setBaseBlob(r.blob);
         setServer(text);
         setSavedAt(Date.now());
-        live.current = { ...live.current, baseBlob: r.blob, server: text };
-        if (live.current.content === text) void drafts.clear(repoId, path);
+        setSaveError(null);
+        live.current = { ...live.current, baseBlob: r.blob, server: text, path: target };
+        if (target !== current) {
+          void drafts.clear(repoId, draftKey);
+          setPath(target);
+          if (mounted.current) navigate(editUrl(repoId, target), { replace: true, state: { adopted: true } });
+        }
+        if (live.current.content === text) void drafts.clear(repoId, target);
         setOffer(null);
+        void siteStore.load(repoId);
       } catch (e) {
         if (e instanceof ApiError && e.status === 409) setConflict(true);
-        else notifyError(e);
+        else setSaveError(errorMessage(e));
       } finally {
         setSaving(false);
       }
     };
     inflight.current = run().finally(() => { inflight.current = null; });
     await inflight.current;
-    if (again.current) { again.current = false; await save(); }
-  }, [repoId, path]);
+    if (again.current) { again.current = false; await save(manual); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoId, nameFile, draftKey]);
 
-  // autosave ~800ms after the last edit
+  // drafts: debounced, and only while there's something unsaved
+  useEffect(() => {
+    if (loading || !dirty || !userEdited.current) return;
+    const t = setTimeout(() => {
+      void drafts.put(repoId, draftKey, { content, baseBlob: live.current.baseBlob, savedAt: Date.now() });
+    }, 250);
+    return () => clearTimeout(t);
+  }, [content, dirty, loading, repoId, draftKey]);
+
+  // autosave a moment after the last edit. A new post waits for the title to
+  // be finished (focus leaves it), or for a body.
+  const titleFocused = useRef(false);
   useEffect(() => {
     if (loading || !userEdited.current || !dirty || conflict) return;
-    const t = setTimeout(() => void save(), 800);
+    if (pendingNew && (titleFocused.current || !nameFile(content))) return;
+    const t = setTimeout(() => void save(), saveError ? 5000 : 900);
     return () => clearTimeout(t);
-  }, [content, dirty, conflict, loading, save]);
+  }, [content, dirty, conflict, loading, save, saveError, pendingNew, nameFile]);
 
-  const onChange = useCallback((v: string) => { userEdited.current = true; setContent(v); }, []);
+  useEffect(() => {
+    const on = () => { if (dirty && !conflict) void save(); };
+    window.addEventListener('online', on);
+    return () => window.removeEventListener('online', on);
+  }, [dirty, conflict, save]);
+
+  const onBody = useCallback((b: string) => {
+    userEdited.current = true;
+    setContent((c) => splitDoc(c).head + b);
+  }, []);
+  const edit = useCallback((next: string) => { userEdited.current = true; setContent(next); }, []);
+
+  // a brand-new post gets its front matter the moment it has a title
+  const setTitle = (t: string) => {
+    const one = t.replace(/\n/g, ' ');
+    edit(setField(doc.raw === null && pendingNew ? template('', !!site?.zola) + doc.body : content, null, 'title', one));
+  };
+
+  // Flush the draft whenever we might lose the page mid-debounce: tab hidden or
+  // closed, and in-app navigation, which unmounts us and cancels the timers.
+  useEffect(() => {
+    const flush = () => {
+      const { content: c, baseBlob: b, server: s, path: p } = live.current;
+      if (!userEdited.current || (s !== null && c === s) || (!p && !c.trim())) return;
+      void drafts.put(repoId, p || draftKey, { content: c, baseBlob: b, savedAt: Date.now() });
+      if (!live.current.conflict) void save();
+    };
+    const onHide = () => { if (document.visibilityState === 'hidden') flush(); };
+    const onUnload = (e: BeforeUnloadEvent) => {
+      flush();
+      const { content: c, server: s, path: p } = live.current;
+      if (userEdited.current && p && (s === null || c !== s)) e.preventDefault();
+    };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onHide);
+    window.addEventListener('beforeunload', onUnload);
+    return () => {
+      flush();
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onHide);
+      window.removeEventListener('beforeunload', onUnload);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoId, draftKey]);
 
   // ---------- reload / drafts / conflict ----------
   const reload = async () => {
+    if (!path) return;
     try {
-      if (dirty && userEdited.current) {
-        await drafts.put(repoId, path, { content, baseBlob, savedAt: Date.now() });
-      }
-      const s = await fetchServer();
+      if (dirty && userEdited.current) await drafts.put(repoId, path, { content, baseBlob, savedAt: Date.now() });
+      const s = await fetchServer(path);
       const d = await drafts.get(repoId, path);
-      const committed = s.content ?? templateFor(path);
+      const committed = s.content ?? '';
       userEdited.current = false;
       setServer(s.content);
       setBaseBlob(s.blob);
@@ -320,11 +489,11 @@ export function Editor() {
   const discardDraft = async () => {
     await drafts.clear(repoId, path);
     try {
-      const s = await fetchServer();
+      const s = await fetchServer(path);
       userEdited.current = false;
       setServer(s.content);
       setBaseBlob(s.blob);
-      setContent(s.content ?? templateFor(path));
+      setContent(s.content ?? '');
     } catch (e) { notifyError(e); }
     setOffer(null);
   };
@@ -339,185 +508,256 @@ export function Editor() {
 
   const keepMine = async () => {
     try {
-      const s = await fetchServer();
+      const s = await fetchServer(path);
       setBaseBlob(s.blob);
       setServer(s.content);
       live.current = { ...live.current, baseBlob: s.blob, server: s.content, conflict: false };
       setConflict(false);
-      await save();
+      await save(true);
     } catch (e) { notifyError(e); }
   };
 
-  const publish = async () => {
-    setPublishing(true);
+  const rename = async (slug: string) => {
+    if (!baseBlob) return;
     try {
-      if (dirty) await save();
-      const r = await api.publish(repoId);
-      notifyOk(`published ${r.pushed.slice(0, 7)}`);
+      await save(true);
+      const parts = path.split('/');
+      const base = parts[parts.length - 1];
+      const bundle = /^index\.[a-z]+$/i.test(base);
+      if (bundle) parts[parts.length - 2] = slug;
+      else parts[parts.length - 1] = `${slug}${base.slice(base.lastIndexOf('.'))}`;
+      const to = parts.join('/');
+      await api.rename(repoId, path, to, live.current.baseBlob ?? baseBlob);
+      recents.rename(repoId, path, to);
+      await siteStore.load(repoId);
+      notifyOk(`Renamed to ${slug}`);
+      navigate(editUrl(repoId, to), { replace: true });
     } catch (e) { notifyError(e); }
-    finally { setPublishing(false); }
   };
 
-  // Flush the draft whenever we might lose the page mid-debounce: tab hidden
-  // or closed, and — the easy one to miss — in-app navigation (back arrow,
-  // history), which unmounts us and cancels the pending timers.
-  useEffect(() => {
-    const flush = () => {
-      const { content: c, baseBlob: b, server: s } = live.current;
-      if (userEdited.current && (s === null || c !== s)) void drafts.put(repoId, path, { content: c, baseBlob: b, savedAt: Date.now() });
-    };
-    const onHide = () => { if (document.visibilityState === 'hidden') flush(); };
-    const onUnload = (e: BeforeUnloadEvent) => {
-      flush();
-      const { content: c, server: s } = live.current;
-      if (userEdited.current && (s === null || c !== s)) e.preventDefault();
-    };
-    window.addEventListener('pagehide', flush);
-    document.addEventListener('visibilitychange', onHide);
-    window.addEventListener('beforeunload', onUnload);
-    return () => {
-      flush();
-      window.removeEventListener('pagehide', flush);
-      document.removeEventListener('visibilitychange', onHide);
-      window.removeEventListener('beforeunload', onUnload);
-    };
-  }, [repoId, path]);
-
-  const words = useMemo(() => wordCount(content), [content]);
-  const docTitle = useMemo(() => {
-    const { toml } = splitFrontMatter(content);
-    const t = toml ? tryParseToml(toml)?.title : null;
-    return typeof t === 'string' && t.trim() ? t : null;
-  }, [content]);
-  const vp = useVisualViewport();
-  useEffect(() => { if (!loading && !loadError) recents.touch(repoId, path, docTitle); }, [repoId, path, loading, loadError]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { if (!loading) recents.retitle(repoId, path, docTitle); }, [docTitle, loading, repoId, path]);
-  const local = repo?.provider === 'local';
-
-  const basename = path.split('/').pop() ?? path;
   const deleteFile = async () => {
     const committed = server !== null && baseBlob;
-    const msg = committed
-      ? `Delete ${path}?\n\nIt's removed in a new commit — still in version history, and nothing changes on the remote until you publish.`
-      : `Discard ${path}? It was never saved.`;
-    if (!window.confirm(msg)) return;
+    const ok = await confirmDialog({
+      title: committed ? 'Delete this post?' : 'Discard this draft?',
+      body: committed ? `${path} is removed in a new commit. It stays in the history, and nothing changes on the site until you publish.` : 'It was never saved.',
+      action: committed ? 'Delete' : 'Discard',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       if (committed) await api.deleteFile(repoId, path, baseBlob);
       userEdited.current = false;
-      await drafts.clear(repoId, path);
-      recents.remove(repoId, path);
-      notifyOk(`deleted ${basename}`);
-      navigate(`/repos/${repoId}`, { replace: true });
+      await drafts.clear(repoId, draftKey);
+      if (path) recents.remove(repoId, path);
+      await siteStore.load(repoId);
+      notifyOk(committed ? 'Deleted' : 'Discarded');
+      navigate(backTo, { replace: true });
     } catch (e) { notifyError(e); }
   };
-  const openHistory = () => navigate(`/repos/${repoId}/versions?path=${encodeURIComponent(path)}`);
-  const stateText = conflict ? 'conflict' : saving ? 'saving…' : dirty ? (server === null ? 'new · modified' : 'modified')
-    : savedAt ? `saved ${clock(savedAt)}` : 'saved';
-  const menuItems = [
-    { label: marks ? 'Hide markdown marks' : 'Show markdown marks', run: () => setMarks(!marks) },
-    { label: 'Version history', run: openHistory },
-    { label: 'Reload from server', run: () => void reload() },
-    ...(repo && !local ? [{ label: 'Publish', run: () => void publish() }] : []),
-    { label: <span style={{ color: tokens.negative }}>Delete file…</span>, run: () => void deleteFile() },
-    { label: `${words} words`, disabled: true, run: () => {} },
+
+  // ---------- images ----------
+  const uploadFiles = useCallback(async (files: File[]) => {
+    for (const file of files) {
+      const hole = editor.current?.placeholder(`![Uploading ${file.name.replace(/[[\]]/g, '')}…]()`);
+      setUploading((n) => n + 1);
+      try {
+        const { blob, name } = await prepareImage(file);
+        const { path: wanted, ref } = uploadTarget(name, live.current.path || null, siteStore.get(repoId).data?.site ?? null);
+        const r = await api.uploadImage(repoId, wanted, blob);
+        await siteStore.load(repoId);
+        hole?.(`![](${ref(r.path)})`);
+      } catch (e) {
+        hole?.(null);
+        notifyError(new Error(`Couldn't add ${file.name}: ${errorMessage(e)}`));
+      } finally { setUploading((n) => n - 1); }
+    }
+  }, [repoId]);
+
+  // ---------- derived ----------
+  const words = useMemo(() => wordCount(doc.body), [doc.body]);
+  useEffect(() => { if (!loading && !loadError && path) recents.touch(repoId, path, titleValue || null); }, [repoId, path, loading, loadError]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!loading && path) recents.retitle(repoId, path, titleValue || null); }, [titleValue, loading, repoId, path]);
+
+  const vp = useVisualViewport();
+  const keyboard = focused && window.matchMedia('(pointer: coarse)').matches;
+  useEffect(() => {
+    document.documentElement.classList.add('editing');
+    return () => document.documentElement.classList.remove('editing');
+  }, []);
+  useEffect(() => {
+    const isField = (t: EventTarget | null) => t instanceof HTMLElement && (t.matches('input, textarea') || t.isContentEditable);
+    const on = (e: FocusEvent) => setFocused(isField(e.target));
+    const off = () => setFocused(false);
+    document.addEventListener('focusin', on);
+    document.addEventListener('focusout', off);
+    return () => { document.removeEventListener('focusin', on); document.removeEventListener('focusout', off); };
+  }, []);
+
+  // A title wraps like the heading it is.
+  useLayoutEffect(() => {
+    const t = titleRef.current;
+    if (!t) return;
+    t.style.height = '0';
+    t.style.height = `${t.scrollHeight}px`;
+  }, [titleValue, loading, tab]);
+
+  // New post: straight into the title.
+  useEffect(() => {
+    if (!loading && pendingNew) titleRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading]);
+
+  const ctx: RenderCtx = useMemo(() => ({ repoId, path: path || null, site, fields: fields ?? {} }), [repoId, path, site, fields]);
+
+  const postDir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+  const listDir = /\/_?index\.[a-z-.]+$/i.test(path) && !isSection ? (postDir.includes('/') ? postDir.slice(0, postDir.lastIndexOf('/')) : '') : postDir;
+  const section = tree?.byDir.get(pendingNew ? (dir ?? '') : listDir);
+  const backTo = section && section !== tree?.root ? `/repos/${repoId}?s=${encodeURIComponent(section.dir)}` : `/repos/${repoId}`;
+  const backLabel = section && section !== tree?.root ? section.name : (site?.title ?? repo?.full_name.split('/').pop() ?? 'Site');
+
+  const chosenDir = dir !== null ? dir : tree ? defaultSection(tree).dir : '';
+  const stateNode = conflict ? <span style={{ color: tokens.negative }}>Conflict</span>
+    : saveError ? <span style={{ color: tokens.warning }} title={saveError}>Not saved, retrying</span>
+    : saving || uploading ? <><Spinner size={12} />{uploading ? 'Adding image' : 'Saving'}</>
+    : pendingNew ? (content.trim() && !nameFile(content) ? 'Add a title to save' : content.trim() ? 'Not saved yet' : '')
+    : dirty ? 'Edited'
+    : savedAt ? <><Icon name="check" size={14} />Saved {clock(savedAt)}</>
+    : 'Saved';
+
+  const menu: MenuItem[] = [
+    { label: marks ? 'Hide markdown syntax' : 'Show markdown syntax', icon: 'code', run: () => { const m = !marks; setMarks(m); try { localStorage.setItem('zdown.marks', m ? '1' : '0'); } catch { /* storage blocked */ } } },
+    ...(path ? [{ label: 'Version history', icon: 'history' as const, run: () => navigate(`/repos/${repoId}/versions?path=${encodeURIComponent(path)}`) }] : []),
+    ...(path ? [{ label: 'Reload from server', icon: 'sync' as const, run: () => void reload() }] : []),
+    ...(repo && !local ? [{ label: 'Publish…', icon: 'upload' as const, run: () => { void save(true); setPublishing(true); } }] : []),
+    { separator: true, label: '' },
+    { label: path ? 'Delete…' : 'Discard…', icon: 'trash', danger: true, run: () => void deleteFile() },
+    { separator: true, label: '' },
+    { label: `${words.toLocaleString()} ${words === 1 ? 'word' : 'words'}`, disabled: true },
   ];
 
-  if (loading) return <Center><Spinner $size="24px" /></Center>;
-  if (loadError) return <Center><ErrorText>{loadError}</ErrorText></Center>;
+  if (loading) return <Loading />;
+  if (loadError) {
+    return (
+      <Center>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, alignItems: 'center', maxWidth: 420 }}>
+          <div style={{ fontFamily: tokens.serif, fontSize: 24, color: tokens.fg }}>{loadError.gone ? 'This post is gone' : 'Couldn’t open this post'}</div>
+          <Muted>{loadError.gone ? `${urlPath} no longer exists. It may have been renamed or removed.` : loadError.message}</Muted>
+          <Btn onClick={() => { if (loadError.gone) recents.remove(repoId, urlPath); navigate(`/repos/${repoId}`, { replace: true }); }}>Back to the site</Btn>
+        </div>
+      </Center>
+    );
+  }
+
+  const noFrontMatter = doc.raw === null && !pendingNew && !!site?.zola && path.startsWith(`${site.root}content/`);
+  const badFrontMatter = fields === null;
 
   return (
     <Shell style={{ top: vp.top, height: vp.height }}>
       <Bar>
-        <NavButton />
-        <TitleBlock title={path}>
-          <DocTitle>{docTitle ?? basename}</DocTitle>
-          <DocPath>{path}</DocPath>
-        </TitleBlock>
-        <SaveState>
-          <DirtyDot $saved={!dirty} title={dirty ? 'modified — ⌘S to save' : 'saved'} />
-          <StateLabel style={{ color: conflict ? tokens.negative : undefined }}>{stateText}</StateLabel>
-        </SaveState>
-        <Full />
-        <Button size={SIZE.mini} kind={KIND.tertiary} aria-label="post settings" aria-expanded={sheet}
-          title="post settings" onClick={() => setSheet(!sheet)}>⚙</Button>
-        <Button size={SIZE.mini} kind={KIND.tertiary} aria-pressed={tab === 'preview'}
-            onClick={() => setTab(tab === 'write' ? 'preview' : 'write')}>{tab === 'write' ? 'preview' : 'edit'}</Button>
-        {repo && !local && !dirty && (
-          <NotPhone><Button size={SIZE.mini} kind={KIND.secondary} isLoading={publishing} onClick={() => void publish()}>publish</Button></NotPhone>
+        <Back to={backTo} aria-label={`Back to ${backLabel}`}><Icon name="back" /><BackLabel>{backLabel}</BackLabel></Back>
+        <Grow />
+        <SaveState aria-live="polite">{stateNode}</SaveState>
+        <IconBtn icon={tab === 'write' ? 'eye' : 'pen'} label={tab === 'write' ? 'Preview' : 'Edit'} aria-pressed={tab === 'preview'}
+          onClick={() => setTab(tab === 'write' ? 'preview' : 'write')} />
+        <IconBtn icon="sliders" label="Post details" aria-expanded={panel} on={panel} onClick={() => setPanel(!panel)} />
+        <Menu items={menu} trigger={(t) => <IconBtn {...t} icon="more" label="More" />} />
+        {repo && !local && (siteState.data?.status.ahead ?? 0) > 0 && (
+          <OnlyDesktop><Btn small kind="primary" style={{ marginLeft: 6, marginRight: 4 }} onClick={() => { void save(true); setPublishing(true); }}>Publish</Btn></OnlyDesktop>
         )}
-        <Button size={SIZE.mini} kind={dirty ? KIND.primary : KIND.tertiary} isLoading={saving}
-          disabled={!dirty || conflict} onClick={() => void save()}>save</Button>
-        <StatefulPopover placement={PLACEMENT.bottomRight}
-            content={({ close }) => (
-              <StatefulMenu
-                items={menuItems}
-                onItemSelect={({ item }) => { if (!item.disabled) { close(); item.run(); } }}
-                overrides={{
-                  List: { style: { width: '220px', backgroundColor: tokens.bg, border: `1px solid ${tokens.border}`, boxShadow: 'none' } },
-                  Option: { props: { overrides: { ListItem: { style: { fontSize: '13px', paddingTop: '12px', paddingBottom: '12px' } } } } },
-                }}
-              />
-            )}>
-            <Button size={SIZE.mini} kind={KIND.tertiary} aria-label="more actions">⋯</Button>
-        </StatefulPopover>
       </Bar>
 
       {conflict && (
-        <Banner $kind="danger">
-          <span style={{ color: tokens.negative }}>conflict</span>
-          <span style={{ color: tokens.fgMuted }}>this file changed on the server since you opened it</span>
-          <Full />
-          <Button size={SIZE.mini} kind={KIND.tertiary} onClick={() => void keepMine()}>keep mine</Button>
-          <Button size={SIZE.mini} kind={KIND.tertiary} onClick={() => void reload()}>take server version</Button>
+        <Banner $tone="negative">
+          <span>This post changed elsewhere since you opened it.</span>
+          <Grow />
+          <Btn small kind="ghost" onClick={() => void reload()}>Use the other version</Btn>
+          <Btn small onClick={() => void keepMine()}>Keep mine</Btn>
         </Banner>
       )}
-
       {offer && (
         <Banner>
-          <span style={{ color: tokens.accent }}>local draft from {clock(offer.savedAt)}</span>
-          {offer.applied ? (
-            <>
-              <span style={{ color: tokens.fgMuted }}>restored instead of the committed file</span>
-              <Full />
-              <Button size={SIZE.mini} kind={KIND.tertiary} onClick={() => void discardDraft()}>discard, show committed</Button>
-            </>
-          ) : (
-            <>
-              <span style={{ color: tokens.fgMuted }}>differs from the committed file</span>
-              <Full />
-              <Button size={SIZE.mini} kind={KIND.tertiary} onClick={restoreDraft}>restore</Button>
-              <Button size={SIZE.mini} kind={KIND.tertiary} onClick={() => void discardDraft()}>discard</Button>
-            </>
-          )}
+          <span>{offer.applied ? `Restored your unsaved edits from ${clock(offer.savedAt)}.` : `You have unsaved edits from ${clock(offer.savedAt)}.`}</span>
+          <Grow />
+          {!offer.applied && <Btn small onClick={restoreDraft}>Restore</Btn>}
+          <Btn small kind="ghost" onClick={() => void discardDraft()}>Discard</Btn>
         </Banner>
+      )}
+      {siteState.conflicts.includes(path) && !conflict && (
+        <Banner $tone="warning" style={{ display: 'block' }}><ConflictBox repo={repo!} onDone={() => void reload()} /></Banner>
       )}
 
       <Body>
-        <div style={{ display: tab === 'write' ? 'flex' : 'none', flex: 1, minHeight: 0, minWidth: 0 }}>
-          <CodeMirror ref={editor} value={content} onChange={onChange} showMarks={marks} onSave={() => void save()} onSelection={setSelBox} />
-        </div>
-        {tab === 'preview' && <div style={{ flex: 1, overflowY: 'auto', minWidth: 0 }}><Preview content={content} repoId={repoId} path={path} /></div>}
-        {sheet && (
-          <SettingsPane aria-label="post settings">
-            <PaneHead>
-              Post settings
-              <Full />
-              <Button size={SIZE.mini} kind={KIND.tertiary} aria-label="close settings" onClick={() => setSheet(false)}>✕</Button>
-            </PaneHead>
-            <FrontMatterSheet content={content} onClose={() => setSheet(false)}
-              onApply={(next) => { userEdited.current = true; setContent(next); }} />
-          </SettingsPane>
+        <Scroller style={{ display: tab === 'write' ? undefined : 'none' }}
+          onMouseDown={(e) => {
+            // the empty space under the text belongs to the text
+            if (e.target === e.currentTarget || (e.target as HTMLElement).dataset.column !== undefined) {
+              e.preventDefault();
+              editor.current?.focusEnd();
+            }
+          }}>
+          <Column data-column="">
+            {pendingNew && tree && tree.byDir.size > 1 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, fontSize: 14, color: tokens.fgMuted }}>
+                <span>New post in</span>
+                <div style={{ width: 'auto', minWidth: 120 }}>
+                  <Select aria-label="Section" value={chosenDir} onChange={(e) => setDir(e.currentTarget.value)}>
+                    {[...tree.byDir.values()].map((n) => <option key={n.dir} value={n.dir}>{n === tree.root ? (site?.title ?? 'Site root') : n.name}</option>)}
+                  </Select>
+                </div>
+              </div>
+            )}
+            <TitleField ref={titleRef} rows={1} aria-label="Title" placeholder={isSection ? 'Section title' : 'Title'}
+              readOnly={badFrontMatter}
+              value={titleValue}
+              onChange={(e) => setTitle(e.currentTarget.value)}
+              onFocus={() => { titleFocused.current = true; }}
+              onBlur={() => {
+                titleFocused.current = false;
+                if (pendingNew && nameFile(content)) void save();
+              }}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); editor.current?.focus(); } }} />
+            <MetaLine>
+              {!isSection && !pendingNew && fields?.date !== undefined && <MetaBtn onClick={() => setPanel(true)}>{formatDate(dateText(fields.date))}</MetaBtn>}
+              {isSection && <Badge>Section page</Badge>}
+              {fields?.draft === true && (
+                <MetaBtn onClick={() => edit(setField(content, null, 'draft', null))} title="Draft: click to make it public"><Badge $tone="accent">Draft</Badge></MetaBtn>
+              )}
+              {fields?.draft !== true && isFuture(dateText(fields?.date) || null) && <Badge $tone="warning">Scheduled</Badge>}
+              {noFrontMatter && (
+                <MetaBtn onClick={() => edit(template(titleValue, false) + doc.body)}><Badge $tone="warning">No front matter: Zola will skip this</Badge> Add it</MetaBtn>
+              )}
+              {badFrontMatter && <MetaBtn onClick={() => setPanel(true)}><Badge $tone="negative">Front matter has an error</Badge> Fix it</MetaBtn>}
+            </MetaLine>
+            <CodeMirror ref={editor} value={doc.body} onChange={onBody} ctx={ctx} showMarks={marks}
+              onSave={() => void save(true)} onFiles={(f) => void uploadFiles(f)} />
+          </Column>
+        </Scroller>
+        {tab === 'preview' && (
+          <Scroller>
+            <Column>
+              <h1 style={{ fontFamily: 'var(--serif)', fontSize: 40, lineHeight: 1.12, fontWeight: 500, letterSpacing: '-.012em', margin: 0, color: tokens.fg }}>{titleValue}</h1>
+              <MetaLine>{fields?.date !== undefined && formatDate(dateText(fields.date))}</MetaLine>
+              <Suspense fallback={<Spinner />}><Preview body={doc.body} ctx={ctx} /></Suspense>
+            </Column>
+          </Scroller>
+        )}
+        {panel && (
+          <Side aria-label="Post details">
+            <SideHead><Grow>Post details</Grow><IconBtn icon="close" label="Close details" onClick={() => setPanel(false)} /></SideHead>
+            <PostSettings content={content} path={path || null} isSection={isSection} onChange={edit} onRename={rename} canRename={!!baseBlob} />
+          </Side>
         )}
       </Body>
 
-      {tab === 'write' && !sheet && <MobileToolbar editor={editor} selecting={!!selBox} />}
-      {tab === 'write' && selBox && finePointer && <FormatPopover box={selBox} editor={editor} />}
+      {tab === 'write' && !panel && (
+        <Toolbar editor={editor} words={words} keyboard={keyboard} onInsert={() => setInsert(true)}
+          onImage={() => fileInput.current?.click()} />
+      )}
+      <input ref={fileInput} type="file" accept="image/*" multiple hidden aria-label="Choose images"
+        onChange={(e) => { const f = [...(e.currentTarget.files ?? [])]; e.currentTarget.value = ''; if (f.length) void uploadFiles(f); }} />
 
-      <Status>
-        <span>{words} words</span>
-        <Full />
-        <span>⌘S save · autosaves while you type</span>
-      </Status>
+      {insert && <InsertSheet site={site} editor={editor} onClose={() => setInsert(false)} />}
+      {publishing && repo && <PublishSheet repo={repo} onClose={() => setPublishing(false)} />}
     </Shell>
   );
 }

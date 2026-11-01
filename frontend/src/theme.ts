@@ -1,81 +1,62 @@
-import { createDarkTheme } from 'baseui';
+// The single source for every colour/font in .tsx: each token is a CSS
+// variable, and styles.css defines the values for light and dark.
+const v = (name: string) => `var(--${name})`;
 
-// Switchyard tokens: the single source for every colour/font used in .tsx.
-// styles.css and the CodeMirror theme mirror these values as raw hex.
 export const tokens = {
-  bg: '#000',
-  fg: '#fff',
-  fgSoft: '#e5e5e5',
-  fgMuted: '#8a8a8a',
-  fgFaint: '#5c5c5c',
-  border: '#262626',
-  rowRule: '#171717',
-  borderStrong: '#3a3a3a',
-  accent: '#7dd3fc',
-  accentLine: '#1f3a4a',
-  accentWash: '#060d12',
-  dangerLine: '#4a2626',
-  dangerWash: '#120606',
-  negative: '#f87171',
-  warning: '#fbbf24',
-  positive: '#4ade80',
-  hover: '#0a0a0a',
-  active: '#1f1f1f',
-  /** text selection: accent-tinted so it reads on black */
-  selection: '#1e4a63',
-  codeBg: '#0d0d0d',
-  serif: '"Newsreader", Georgia, serif',
-  mono: 'ui-monospace, "SF Mono", Menlo, monospace',
-  /** page titles only — the one size above 17px prose */
-  titleSize: '20px',
-  sans: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+  bg: v('bg'),
+  surface: v('surface'),
+  sunken: v('sunken'),
+  fg: v('fg'),
+  fgSoft: v('fg-soft'),
+  fgMuted: v('fg-muted'),
+  fgFaint: v('fg-faint'),
+  border: v('border'),
+  rule: v('rule'),
+  accent: v('accent'),
+  accentWash: v('accent-wash'),
+  onAccent: v('on-accent'),
+  negative: v('negative'),
+  negativeWash: v('negative-wash'),
+  warning: v('warning'),
+  warningWash: v('warning-wash'),
+  positive: v('positive'),
+  hover: v('hover'),
+  active: v('active'),
+  shadow: v('shadow'),
+  serif: v('serif'),
+  sans: v('sans'),
+  mono: v('mono'),
 };
 
-const zero = '0px';
+/** One constant per breakpoint so media queries read the same everywhere. */
+export const PHONE = '@media (max-width: 639px)';
+export const DRAWERLESS = '@media (max-width: 899px)';
+export const DESKTOP = '@media (min-width: 900px)';
+export const COARSE = '@media (pointer: coarse)';
+export const HOVER = '@media (hover: hover)';
 
-export const theme = createDarkTheme({
-  colors: {
-    primaryA: tokens.fg,
-    primaryB: tokens.bg,
-    backgroundPrimary: tokens.bg,
-    backgroundSecondary: tokens.hover,
-    backgroundTertiary: tokens.active,
-    contentPrimary: tokens.fg,
-    contentSecondary: tokens.fgMuted,
-    contentTertiary: tokens.fgFaint,
-    borderOpaque: tokens.border,
-    borderSelected: tokens.accent,
-    negative: tokens.negative,
-    warning: tokens.warning,
-    positive: tokens.positive,
-    accent: tokens.accent,
-    inputFill: tokens.hover,
-    inputFillActive: tokens.hover,
-    inputBorder: tokens.border,
-  },
-  borders: {
-    radius100: zero,
-    radius200: zero,
-    radius300: zero,
-    radius400: zero,
-    radius500: zero,
-    buttonBorderRadius: zero,
-    buttonBorderRadiusMini: zero,
-    checkboxBorderRadius: zero,
-    surfaceBorderRadius: zero,
-    inputBorderRadius: zero,
-    inputBorderRadiusMini: zero,
-    popoverBorderRadius: zero,
-    tagBorderRadius: zero,
-  },
-  typography: {
-    font100: { fontFamily: tokens.sans },
-    font150: { fontFamily: tokens.sans },
-    font200: { fontFamily: tokens.sans },
-    font250: { fontFamily: tokens.sans },
-    font300: { fontFamily: tokens.sans },
-    font350: { fontFamily: tokens.sans },
-    font400: { fontFamily: tokens.sans },
-    font450: { fontFamily: tokens.sans },
-  },
-});
+export const SIDEBAR_W = 272;
+export const TABS_H = 56;
+
+export type ThemePref = 'auto' | 'light' | 'dark';
+const THEME_KEY = 'zdown.theme';
+
+export function themePref(): ThemePref {
+  try {
+    const t = localStorage.getItem(THEME_KEY);
+    return t === 'light' || t === 'dark' ? t : 'auto';
+  } catch { return 'auto'; }
+}
+
+export function applyTheme(pref: ThemePref = themePref()) {
+  const root = document.documentElement;
+  if (pref === 'auto') root.removeAttribute('data-theme');
+  else root.setAttribute('data-theme', pref);
+  const dark = pref === 'dark' || (pref === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#171512' : '#fbfaf6');
+}
+
+export function setThemePref(pref: ThemePref) {
+  try { localStorage.setItem(THEME_KEY, pref); } catch { /* storage blocked */ }
+  applyTheme(pref);
+}

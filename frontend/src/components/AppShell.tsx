@@ -1,188 +1,128 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { styled } from 'baseui';
-import { api, type Repo } from '../api';
+import { styled } from 'styletron-react';
 import { useAuth } from '../auth';
 import { editUrl, useRecents } from '../lib/recents';
+import { repoStore, useRepos, useSite } from '../lib/store';
+import { api, type Repo } from '../api';
 import { notifyError } from '../notify';
-import { tokens } from '../theme';
+import { DESKTOP, DRAWERLESS, HOVER, SIDEBAR_W, TABS_H, tokens } from '../theme';
+import { Icon, type IconName } from './icons';
+import { Grow, IconBtn, Sheet } from './ui';
 import { UserMark } from './UserMark';
-import { COARSE } from './ui';
 
-// One layout at every size (ChatGPT/Claude/Linear pattern): a sidebar with
-// "new", recent files and projects; content on the right. Below DRAWER the
-// same sidebar slides over the content instead of sitting beside it — its
-// contents never change between sizes.
-export const NAV_W = 260;
-const DRAWER_Q = '(max-width: 899px)';
-const PHONE_Q = '(max-width: 639px)';
-export const BOTTOM_BAR_H = 56;
+// Wide screens get a sidebar; everything narrower gets the same destinations as
+// a tab bar in thumb reach, with no hidden drawer to discover. The editor takes
+// the whole screen and has its own way back.
+
 const COLLAPSED_KEY = 'zdown.navCollapsed';
 
-interface ShellCtx {
-  /** sidebar not visible — pages show a ☰ button */
-  navHidden: boolean;
-  openNav: () => void;
-  repos: Repo[] | null;
-  reloadRepos: () => void;
-}
-const Ctx = createContext<ShellCtx>({ navHidden: false, openNav: () => {}, repos: null, reloadRepos: () => {} });
-export const useShell = () => useContext(Ctx);
-
-function useMedia(q: string) {
-  const [m, setM] = useState(() => window.matchMedia(q).matches);
-  useEffect(() => {
-    const mq = window.matchMedia(q);
-    const on = () => setM(mq.matches);
-    mq.addEventListener('change', on);
-    return () => mq.removeEventListener('change', on);
-  }, [q]);
-  return m;
-}
-
-const Side = styled<'nav', { $drawer: boolean; $open: boolean }>('nav', ({ $drawer, $open }) => ({
+const Side = styled('nav', {
   position: 'fixed',
   top: 0,
   bottom: 0,
   left: 0,
-  width: `${NAV_W}px`,
-  maxWidth: '85vw',
+  width: `${SIDEBAR_W}px`,
   display: 'flex',
   flexDirection: 'column',
-  backgroundColor: tokens.bg,
-  borderRight: `1px solid ${tokens.border}`,
+  backgroundColor: tokens.sunken,
   zIndex: 30,
-  transform: $open ? 'none' : `translateX(-100%)`,
-  transition: $drawer ? 'transform 160ms ease-out' : 'none',
-  visibility: $open ? 'visible' : 'hidden',
-}));
-
-const Scrim = styled('div', {
-  position: 'fixed',
-  inset: 0,
-  backgroundColor: 'rgba(0,0,0,0.6)',
-  zIndex: 29,
+  [DRAWERLESS]: { display: 'none' },
 });
 
 const SideHead = styled('div', {
-  height: '48px',
+  height: '52px',
   flexShrink: 0,
   display: 'flex',
   alignItems: 'center',
-  gap: '8px',
   padding: '0 8px 0 16px',
 });
 
 const Brand = styled(Link, {
-  display: 'flex',
-  alignItems: 'center',
-  gap: '8px',
-  fontWeight: 600,
-  fontSize: '13px',
+  fontFamily: tokens.serif,
+  fontStyle: 'italic',
+  fontWeight: 500,
+  fontSize: '22px',
+  letterSpacing: '-.01em',
   color: tokens.fg,
   flex: 1,
-  [COARSE]: { minHeight: '40px' },
 });
 
-const Mark = styled('span', { width: '10px', height: '10px', backgroundColor: tokens.accent, flexShrink: 0 });
+export const BrandDot = () => <span style={{ color: tokens.accent }}>.</span>;
 
-export const IconBtn = styled('button', {
-  width: '32px',
-  height: '32px',
-  flexShrink: 0,
-  display: 'grid',
-  placeItems: 'center',
-  border: 'none',
-  background: 'none',
-  color: tokens.fgMuted,
-  fontSize: '15px',
-  cursor: 'pointer',
-  ':hover': { color: tokens.fg, backgroundColor: tokens.hover },
-  ':focus-visible': { outline: `1px solid ${tokens.accent}` },
-  [COARSE]: { width: '40px', height: '40px' },
-});
-
-const NewBtn = styled(Link, {
-  margin: '4px 8px 8px',
+const NewBtn = styled('button', {
+  appearance: 'none',
+  margin: '2px 12px 10px',
   height: '36px',
-  padding: '0 12px',
   display: 'flex',
   alignItems: 'center',
-  gap: '8px',
-  border: `1px solid ${tokens.border}`,
-  fontSize: '13px',
-  color: tokens.fg,
-  ':hover': { backgroundColor: tokens.hover, borderColor: tokens.borderStrong },
-  [COARSE]: { height: '44px' },
+  justifyContent: 'center',
+  gap: '6px',
+  border: 'none',
+  borderRadius: '8px',
+  backgroundColor: tokens.fg,
+  color: tokens.bg,
+  fontSize: '14px',
+  fontWeight: 500,
+  cursor: 'pointer',
+  flexShrink: 0,
+  [HOVER]: { ':hover': { backgroundColor: tokens.fgSoft } },
+  ':active': { opacity: 0.8 },
 });
 
-const Scroll = styled('div', { flex: 1, overflowY: 'auto', minHeight: 0, paddingBottom: '8px' });
+const Scroll = styled('div', { flex: 1, overflowY: 'auto', minHeight: 0, paddingBottom: '12px' });
 
-const Section = styled('div', {
-  padding: '16px 16px 4px',
-  fontFamily: tokens.mono,
-  fontSize: '11px',
+const Label = styled('div', {
+  padding: '14px 18px 4px',
+  fontSize: '12px',
+  fontWeight: 600,
   color: tokens.fgFaint,
   display: 'flex',
   alignItems: 'center',
 });
 
-const Item = styled<typeof Link, { $active?: boolean }>(Link, ({ $active }) => ({
+const itemStyle = ($active?: boolean) => ({
   margin: '0 8px',
-  padding: '7px 8px',
+  padding: '6px 10px',
   display: 'flex',
-  flexDirection: 'column',
-  gap: '1px',
+  alignItems: 'center',
+  gap: '8px',
   minWidth: 0,
-  color: tokens.fgSoft,
-  ':hover': { backgroundColor: $active ? tokens.active : tokens.hover, color: tokens.fg },
-  ...($active ? { backgroundColor: tokens.active, color: tokens.fg } : {}),
-  [COARSE]: { padding: '10px 8px' },
-}));
+  fontSize: '14px',
+  borderRadius: '7px',
+  color: $active ? tokens.fg : tokens.fgSoft,
+  backgroundColor: $active ? tokens.active : 'transparent',
+  fontWeight: $active ? 500 : 400,
+  [HOVER]: { ':hover': { backgroundColor: $active ? tokens.active : tokens.hover, color: tokens.fg } },
+} as const);
 
-const ItemTitle = styled('span', {
-  fontSize: '13px',
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-  whiteSpace: 'nowrap',
-});
+const Item = styled<typeof Link, { $active?: boolean }>(Link, ({ $active }) => itemStyle($active));
 
-const ItemMeta = styled('span', {
-  fontFamily: tokens.mono,
-  fontSize: '11px',
-  color: tokens.fgMuted,
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-  whiteSpace: 'nowrap',
-});
+const SubItem = styled<typeof Link, { $active?: boolean }>(Link, ({ $active }) => ({ ...itemStyle($active), padding: '4px 10px 4px 26px', fontSize: '13.5px' }));
 
-const SectionLink = styled(Link, {
-  marginLeft: 'auto',
-  [COARSE]: { padding: '14px 0 14px 16px', margin: '-14px 0 -14px auto' },
-  color: tokens.fgMuted,
-  ':hover': { color: tokens.fg },
-});
+const Ellipsis = styled('span', { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 });
+
+const Num = styled('span', { fontSize: '12px', color: tokens.fgFaint, fontVariantNumeric: 'tabular-nums', flexShrink: 0 });
 
 const Foot = styled(NavLink, {
   flexShrink: 0,
   minHeight: '52px',
-  paddingBottom: 'env(safe-area-inset-bottom)',
   padding: '0 16px',
   display: 'flex',
   alignItems: 'center',
   gap: '10px',
-  borderTop: `1px solid ${tokens.border}`,
-  fontSize: '13px',
+  fontSize: '14px',
   color: tokens.fgSoft,
-  ':hover': { backgroundColor: tokens.hover, color: tokens.fg },
-  '&.active': { color: tokens.fg },
+  [HOVER]: { ':hover': { backgroundColor: tokens.hover, color: tokens.fg } },
 });
 
-const Main = styled('main', { minHeight: '100vh', minWidth: 0 });
+const Main = styled('main', {
+  minHeight: '100dvh',
+  minWidth: 0,
+  [DRAWERLESS]: { paddingBottom: `calc(${TABS_H}px + env(safe-area-inset-bottom))` },
+});
 
-// Phones: primary navigation sits at the bottom, in thumb reach (iOS tab bar
-// pattern) — browse (opens the sidebar), new file, account.
-const BottomBar = styled('nav', {
+const Tabs = styled('nav', {
   position: 'fixed',
   left: 0,
   right: 0,
@@ -190,166 +130,214 @@ const BottomBar = styled('nav', {
   zIndex: 20,
   display: 'flex',
   backgroundColor: tokens.bg,
-  borderTop: `1px solid ${tokens.border}`,
+  borderTop: `1px solid ${tokens.rule}`,
   paddingBottom: 'env(safe-area-inset-bottom)',
+  [DESKTOP]: { display: 'none' },
 });
 
-const Tab = styled<'button', { $on?: boolean }>('button', ({ $on }) => ({
+const tabStyle = ($on?: boolean) => ({
   flex: 1,
-  height: `${BOTTOM_BAR_H}px`,
+  height: `${TABS_H}px`,
   display: 'flex',
   flexDirection: 'column',
   alignItems: 'center',
   justifyContent: 'center',
-  gap: '3px',
+  gap: '2px',
   border: 'none',
   background: 'none',
-  fontFamily: tokens.sans,
   fontSize: '11px',
+  fontWeight: 500,
   color: $on ? tokens.fg : tokens.fgMuted,
   cursor: 'pointer',
-}));
+  ':active': { opacity: 0.6 },
+} as const);
 
-const TabIcon = styled('span', { fontSize: '18px', lineHeight: 1, height: '20px', display: 'grid', placeItems: 'center' });
+const TabLink = styled<typeof Link, { $on?: boolean }>(Link, ({ $on }) => tabStyle($on));
+const TabBtn = styled('button', tabStyle(false));
 
-/** Slim header for pages when the sidebar is hidden (drawer mode / collapsed). */
-const PageBar = styled('div', {
-  height: '48px',
+const Collapsed = styled('div', {
+  position: 'fixed',
+  top: '8px',
+  left: '8px',
+  zIndex: 25,
   display: 'flex',
-  alignItems: 'center',
-  gap: '8px',
-  padding: '0 8px',
-  position: 'sticky',
-  top: 0,
-  zIndex: 10,
-  backgroundColor: tokens.bg,
-  borderBottom: `1px solid ${tokens.border}`,
+  gap: '2px',
+  [DRAWERLESS]: { display: 'none' },
 });
 
-const short = (full: string) => full.split('/').pop() ?? full;
 const fileName = (path: string) => (path.split('/').pop() ?? path).replace(/\.(md|markdown)$/i, '');
+const short = (full: string) => full.split('/').pop() ?? full;
 
-export function NavButton() {
-  const { navHidden, openNav } = useShell();
-  if (!navHidden) return null;
-  return <IconBtn aria-label="open sidebar" onClick={openNav}>☰</IconBtn>;
+const LAST_REPO = 'zdown.lastRepo';
+const remember = (id: number) => { try { localStorage.setItem(LAST_REPO, String(id)); } catch { /* storage blocked */ } };
+const lastRepo = () => { try { return Number(localStorage.getItem(LAST_REPO)) || null; } catch { return null; } };
+
+function SiteNav({ repo, currentDir, active }: { repo: Repo; currentDir: string | null; active: boolean }) {
+  const { data, tree } = useSite(repo.id);
+  const name = data?.site.title || short(repo.full_name);
+  const changes = data?.status.changed.length ?? 0;
+  return (
+    <>
+      <Item to={`/repos/${repo.id}`} $active={active && currentDir === null}>
+        <Icon name="folder" size={16} style={{ color: tokens.fgMuted }} />
+        <Ellipsis>{name}</Ellipsis>
+        {changes > 0 && repo.provider !== 'local' && <Num title={`${changes} unpublished`} style={{ color: tokens.accent }}>{changes}</Num>}
+      </Item>
+      {active && tree?.root.children.map((s) => (
+        <SubItem key={s.dir} to={`/repos/${repo.id}?s=${encodeURIComponent(s.dir)}`} $active={currentDir === s.dir || !!currentDir?.startsWith(`${s.dir}/`)}>
+          <Ellipsis>{s.name}</Ellipsis><Num>{s.total}</Num>
+        </SubItem>
+      ))}
+    </>
+  );
+}
+
+/** Choose a site, then a section. Skipped entirely when there's only one place to go. */
+function NewPostSheet({ repos, onClose }: { repos: Repo[]; onClose(): void }) {
+  const navigate = useNavigate();
+  const go = (r: Repo) => { onClose(); remember(r.id); navigate(`/repos/${r.id}/edit?new=1`); };
+  return (
+    <Sheet title="New post in…" onClose={onClose}>
+      <div style={{ display: 'flex', flexDirection: 'column', margin: '0 -8px' }}>
+        {repos.map((r) => (
+          <button key={r.id} type="button" onClick={() => go(r)} style={{
+            appearance: 'none', border: 'none', background: 'none', padding: '12px 8px', textAlign: 'left', cursor: 'pointer',
+            fontSize: 15, color: tokens.fg, display: 'flex', alignItems: 'center', gap: 10, borderRadius: 8,
+          }}>
+            <Icon name="folder" size={18} style={{ color: tokens.fgMuted }} />
+            <span style={{ flex: 1 }}>{short(r.full_name)}</span>
+            <span style={{ fontSize: 13, color: tokens.fgMuted }}>{r.provider === 'local' ? 'Scratchpad' : r.full_name}</span>
+          </button>
+        ))}
+      </div>
+    </Sheet>
+  );
 }
 
 export function AppShell({ children, bare = false }: { children: React.ReactNode; bare?: boolean }) {
   const { me } = useAuth();
-  const drawer = useMedia(DRAWER_Q);
-  const phone = useMedia(PHONE_Q);
-  // hide the bottom bar while typing (it would ride the keyboard on Android)
-  const [typing, setTyping] = useState(false);
-  useEffect(() => {
-    const isField = (t: EventTarget | null) => t instanceof HTMLElement && (t.matches('input, textarea') || t.isContentEditable);
-    const on = (e: FocusEvent) => setTyping(isField(e.target));
-    const off = () => setTyping(false);
-    document.addEventListener('focusin', on);
-    document.addEventListener('focusout', off);
-    return () => { document.removeEventListener('focusin', on); document.removeEventListener('focusout', off); };
-  }, []);
   const loc = useLocation();
   const navigate = useNavigate();
   const recent = useRecents();
+  const repos = useRepos();
   const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem(COLLAPSED_KEY) === '1'; } catch { return false; } });
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [repos, setRepos] = useState<Repo[] | null>(null);
+  const [wide, setWide] = useState(() => window.matchMedia('(min-width: 900px)').matches);
+  const [picking, setPicking] = useState(false);
 
-  const reloadRepos = useCallback(() => { api.repos().then(setRepos, notifyError); }, []);
-  useEffect(reloadRepos, [reloadRepos]);
-  useEffect(() => setDrawerOpen(false), [loc.pathname, loc.search]);
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 900px)');
+    const on = () => setWide(mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, []);
 
-  const open = drawer ? drawerOpen : !collapsed;
-  const navHidden = !open || drawer;
-  const docked = !drawer && open;
+  const toggle = useCallback(() => {
+    setCollapsed((c) => {
+      try { localStorage.setItem(COLLAPSED_KEY, c ? '0' : '1'); } catch { /* storage blocked */ }
+      return !c;
+    });
+  }, []);
+
+  const docked = wide && !collapsed;
 
   // The editor shell is position:fixed; it reads this to sit beside the sidebar.
   useEffect(() => {
-    document.documentElement.style.setProperty('--nav-w', docked ? `${NAV_W}px` : '0px');
+    document.documentElement.style.setProperty('--nav-w', docked ? `${SIDEBAR_W}px` : '0px');
   }, [docked]);
-
-  const setCollapsedPersist = (c: boolean) => {
-    setCollapsed(c);
-    try { localStorage.setItem(COLLAPSED_KEY, c ? '1' : '0'); } catch { /* ignore */ }
-  };
-  const openNav = useCallback(() => (drawer ? setDrawerOpen(true) : setCollapsedPersist(false)), [drawer]);
-  const closeNav = () => (drawer ? setDrawerOpen(false) : setCollapsedPersist(true));
 
   // ⌘\ / Ctrl+\ toggles the sidebar (Linear, VS Code).
   useEffect(() => {
-    const on = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === '\\') { e.preventDefault(); open ? closeNav() : openNav(); }
-      if (e.key === 'Escape' && drawer && drawerOpen) setDrawerOpen(false);
-    };
+    const on = (e: KeyboardEvent) => { if ((e.metaKey || e.ctrlKey) && e.key === '\\') { e.preventDefault(); toggle(); } };
     window.addEventListener('keydown', on);
     return () => window.removeEventListener('keydown', on);
-  });
+  }, [toggle]);
 
-  const repoName = useMemo(() => new Map((repos ?? []).map((r) => [r.id, short(r.full_name)])), [repos]);
-  const shownRecent = recent.filter((r) => repos === null || repoName.has(r.repoId)).slice(0, 15);
+  const repoMatch = /^\/repos\/(\d+)/.exec(loc.pathname);
+  const activeRepo = repoMatch ? Number(repoMatch[1]) : null;
+  useEffect(() => { if (activeRepo) remember(activeRepo); }, [activeRepo]);
+
+  const params = new URLSearchParams(loc.search);
+  const currentDir = params.get('s');
   const current = loc.pathname.endsWith('/edit') ? `${loc.pathname}${loc.search}` : null;
+  const known = useMemo(() => new Map((repos ?? []).map((r) => [r.id, r])), [repos]);
+  const shownRecent = recent.filter((r) => repos === null || known.has(r.repoId)).slice(0, 5);
 
-  const ctx = useMemo(() => ({ navHidden, openNav, repos, reloadRepos }), [navHidden, openNav, repos, reloadRepos]);
+  const newPost = useCallback(async () => {
+    if (!repos) return;
+    if (repos.length === 0) {
+      try {
+        const r = await api.createScratch('notes');
+        await repoStore.reload();
+        navigate(`/repos/${r.id}/edit?new=1&in=`);
+      } catch (e) { notifyError(e); }
+      return;
+    }
+    // writing "into" the site you're looking at, or the only one there is
+    const here = activeRepo && known.has(activeRepo) ? activeRepo : repos.length === 1 ? repos[0].id : null;
+    if (here) navigate(`/repos/${here}/edit?new=1${currentDir ? `&in=${encodeURIComponent(currentDir)}` : ''}`);
+    else setPicking(true);
+  }, [repos, activeRepo, known, currentDir, navigate]);
+
+  const siteTab = activeRepo ?? (lastRepo() && known.has(lastRepo()!) ? lastRepo() : repos?.[0]?.id ?? null);
 
   return (
-    <Ctx.Provider value={ctx}>
-      {drawer && drawerOpen && <Scrim onClick={() => setDrawerOpen(false)} />}
-      <Side $drawer={drawer} $open={open} aria-label="sidebar" aria-hidden={!open}>
-        <SideHead>
-          <Brand to="/"><Mark />zdown</Brand>
-          <IconBtn aria-label="close sidebar" title="close sidebar (⌘\)" onClick={closeNav}>{drawer ? '✕' : '«'}</IconBtn>
-        </SideHead>
-        <NewBtn to="/" onClick={(e) => { if (loc.pathname === '/') { e.preventDefault(); navigate('/', { state: { fresh: Date.now() } }); } }}>
-          <span style={{ color: tokens.accent }}>+</span> New file
-        </NewBtn>
-        <Scroll>
-          <Section>recent</Section>
-          {shownRecent.length === 0 && <Section style={{ paddingTop: 4, color: tokens.fgMuted }}>files you open show up here</Section>}
-          {shownRecent.map((r) => {
-            const to = editUrl(r.repoId, r.path);
-            return (
-              <Item key={`${r.repoId}:${r.path}`} to={to} $active={to === current} title={r.path}>
-                <ItemTitle>{r.title || fileName(r.path)}</ItemTitle>
-                <ItemMeta>{repoName.get(r.repoId) ?? '…'}</ItemMeta>
-              </Item>
-            );
-          })}
-          <Section>projects<SectionLink to="/repos" aria-label="add project" title="add or import a project">+ add</SectionLink></Section>
-          {repos?.map((r) => (
-            <Item key={r.id} to={`/repos/${r.id}`} $active={loc.pathname === `/repos/${r.id}`}>
-              <ItemTitle>{short(r.full_name)}</ItemTitle>
-              <ItemMeta>{r.provider === 'local' ? 'local' : r.full_name}</ItemMeta>
-            </Item>
-          ))}
-        </Scroll>
-        {me && (
-          <Foot to="/settings">
-            <UserMark login={me.login} url={me.avatar_url} size={24} />
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{me.name || me.login}</span>
-          </Foot>
-        )}
-      </Side>
-      <Main style={{ marginLeft: docked ? NAV_W : 0 }}>
-        {!bare && navHidden && !phone && <PageBar><NavButton /><Brand to="/" style={{ flex: 'none' }}><Mark />zdown</Brand></PageBar>}
-        {children}
-        {!bare && phone && <div style={{ height: `calc(${BOTTOM_BAR_H}px + env(safe-area-inset-bottom))` }} />}
-      </Main>
-      {!bare && phone && me && !typing && (
-        <BottomBar aria-label="primary">
-          <Tab $on={drawerOpen || loc.pathname.startsWith('/repos')} onClick={() => setDrawerOpen(true)}>
-            <TabIcon>☰</TabIcon>files
-          </Tab>
-          <Tab $on={loc.pathname === '/'} aria-label="new file"
-            onClick={() => navigate('/', { state: { fresh: Date.now() } })}>
-            <TabIcon style={{ color: tokens.accent }}>＋</TabIcon>new
-          </Tab>
-          <Tab $on={loc.pathname === '/settings'} onClick={() => navigate('/settings')}>
-            <TabIcon><UserMark login={me.login} url={me.avatar_url} size={20} /></TabIcon>account
-          </Tab>
-        </BottomBar>
+    <>
+      {collapsed && !bare && (
+        <Collapsed>
+          <IconBtn icon="sidebar" label="Show sidebar (⌘\)" onClick={toggle} />
+          <IconBtn icon="plus" label="New post" onClick={() => void newPost()} />
+        </Collapsed>
       )}
-
-    </Ctx.Provider>
+      {!collapsed && (
+        <Side aria-label="Sidebar">
+          <SideHead>
+            <Brand to="/">zdown<BrandDot /></Brand>
+            <IconBtn icon="sidebar" label="Hide sidebar (⌘\)" onClick={toggle} />
+          </SideHead>
+          <NewBtn type="button" onClick={() => void newPost()}><Icon name="plus" size={17} />New post</NewBtn>
+          <Scroll>
+            <Item to="/" $active={loc.pathname === '/'}><Icon name="home" size={16} style={{ color: tokens.fgMuted }} /><Ellipsis>Home</Ellipsis></Item>
+            {shownRecent.length > 0 && <Label>Recent</Label>}
+            {shownRecent.map((r) => {
+              const to = editUrl(r.repoId, r.path);
+              return (
+                <Item key={`${r.repoId}:${r.path}`} to={to} $active={to === current} title={r.path}>
+                  <Ellipsis>{r.title || fileName(r.path)}</Ellipsis>
+                </Item>
+              );
+            })}
+            <Label>
+              <Grow>Sites</Grow>
+              <Link to="/repos" aria-label="Manage sites" title="Add or manage sites" style={{ color: tokens.fgMuted, display: 'grid' }}><Icon name="plus" size={15} /></Link>
+            </Label>
+            {repos?.map((r) => <SiteNav key={r.id} repo={r} active={activeRepo === r.id} currentDir={activeRepo === r.id ? currentDir : null} />)}
+          </Scroll>
+          {me && (
+            <Foot to="/settings">
+              <UserMark login={me.login} url={me.avatar_url} size={24} />
+              <Ellipsis>{me.name || me.login}</Ellipsis>
+            </Foot>
+          )}
+        </Side>
+      )}
+      <Main style={{ marginLeft: docked ? SIDEBAR_W : 0 }}>{children}</Main>
+      {!bare && me && (
+        <Tabs aria-label="Primary">
+          <TabLink to="/" $on={loc.pathname === '/'}><TabIcon name="home" />Home</TabLink>
+          {siteTab ? (
+            <TabLink to={`/repos/${siteTab}`} $on={loc.pathname.startsWith('/repos/')}><TabIcon name="folder" />Site</TabLink>
+          ) : (
+            <TabLink to="/repos" $on={loc.pathname === '/repos'}><TabIcon name="folder" />Sites</TabLink>
+          )}
+          <TabBtn type="button" aria-label="New post" onClick={() => void newPost()}><TabIcon name="plus" />New</TabBtn>
+          <TabLink to="/settings" $on={loc.pathname === '/settings'}><TabIcon name="user" />You</TabLink>
+        </Tabs>
+      )}
+      {picking && repos && <NewPostSheet repos={repos} onClose={() => setPicking(false)} />}
+    </>
   );
+}
+
+function TabIcon({ name }: { name: IconName }) {
+  return <Icon name={name} size={22} />;
 }

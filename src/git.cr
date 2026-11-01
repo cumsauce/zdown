@@ -115,6 +115,12 @@ module MdEditor
       safe_rel_path?(path)
     end
 
+    IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "ico", "bmp"}
+
+    def image?(path : String) : Bool
+      IMAGE_EXTS.includes?(path.split('.').last?.try(&.downcase) || "")
+    end
+
     def push_mirror(repo_id : Int64, url : String, refspec : String, auth : String) : Nil
       run(["push", url, refspec], cwd: mirror_path(repo_id), auth: auth)
     end
@@ -154,14 +160,143 @@ module MdEditor
       status == 0
     end
 
+    # Every file at ref as {blob, path}. -z: paths arrive unquoted, so a
+    # non-ASCII filename isn't mangled into "caf\303\251.md".
+    def list_tree(repo_id : Int64, ref : String) : Array({String, String})
+      out = run(["ls-tree", "-r", "-z", "--format=%(objecttype) %(objectname) %(path)", ref], cwd: mirror_path(repo_id))
+      out.split('\0', remove_empty: true).compact_map do |rec|
+        kind, sha, path = rec.split(' ', 3)
+        kind == "blob" ? {sha, path} : nil # submodules are "commit"
+      end
+    end
+
     # Markdown files at ref, with blob ids for cheap change detection.
     def list_markdown(repo_id : Int64, ref : String) : Array({String, String})
-      out = run(["ls-tree", "-r", "--format=%(objectname) %(path)", ref], cwd: mirror_path(repo_id))
-      out.lines.compact_map do |line|
-        sha, path = line.split(' ', 2)
-        next unless path && path.ends_with?(".md")
-        {sha, path}
+      list_tree(repo_id, ref).select { |(_, path)| markdown?(path) }
+    end
+
+    def markdown?(path : String) : Bool
+      lower = path.downcase
+      lower.ends_with?(".md") || lower.ends_with?(".markdown")
+    end
+
+    # Many files in one process (`git show` per file costs a fork each: a
+    # 300-post site took seconds to list). Missing paths are simply absent.
+    def read_many(repo_id : Int64, ref : String, paths : Array(String)) : Hash(String, String)
+      result = {} of String => String
+      return result if paths.empty?
+      sout = IO::Memory.new
+      input = String.build { |io| paths.each { |p| io << ref << ':' << p << '\n' } }
+      exec_git(["cat-file", "--batch"], cwd: mirror_path(repo_id), stdin: input, output: sout)
+      sout.rewind
+      paths.each do |path|
+        header = sout.gets || break
+        parts = header.split(' ')
+        next unless parts.size == 3 && parts[1] == "blob"
+        buf = Bytes.new(parts[2].to_i)
+        sout.read_fully(buf)
+        sout.read_byte # the newline after each object
+        result[path] = String.new(buf).scrub
       end
+      result
+    end
+
+    # When each path last changed, from one walk of the history.
+    def last_modified(repo_id : Int64, ref : String, limit : Int32 = 3000) : Hash(String, Int64)
+      out = run(["-c", "core.quotepath=off", "log", "--format=@%at", "--name-only", "--no-merges", "-n#{limit}", ref],
+        cwd: mirror_path(repo_id))
+      times = {} of String => Int64
+      at = 0_i64
+      out.each_line do |line|
+        if line.starts_with?('@') && (t = line[1..].to_i64?)
+          at = t
+        elsif !line.empty?
+          times[line] = at unless times.has_key?(line) # newest first
+        end
+      end
+      times
+    end
+
+    def head_sha(repo_id : Int64, ref : String) : String
+      run(["rev-parse", "--verify", "#{ref}^{commit}"], cwd: mirror_path(repo_id)).strip
+    end
+
+    # ---- integration of the remote into the working branch ----
+
+    record Integration, state : String, conflicts : Array(String)
+
+    # A working branch forks from the default branch on its first save, and
+    # used to stay frozen there: anything edited or deleted on the remote
+    # afterwards never showed up (stale and "removed" articles in the list),
+    # and publish was rejected as non-fast-forward. Bring it up to date:
+    #   only ahead      -> nothing to do
+    #   only behind     -> fast-forward
+    #   diverged, clean -> merge commit
+    #   diverged, both touched the same lines -> state "conflict"; nothing
+    #   moves until the caller picks a side (resolve = "mine" | "theirs").
+    def integrate(repo_id : Int64, branch : String, default : String, author_name : String,
+                  author_email : String, resolve : String? = nil) : Integration
+      cwd = mirror_path(repo_id)
+      none = [] of String
+      return Integration.new("up_to_date", none) unless branch_exists?(repo_id, branch) && branch_exists?(repo_id, default)
+      mine = run_head_sha(repo_id, branch)
+      theirs = run_head_sha(repo_id, default)
+      return Integration.new("up_to_date", none) if mine == theirs || ancestor?(cwd, theirs, mine)
+      if ancestor?(cwd, mine, theirs)
+        update_ref(cwd, "refs/heads/#{branch}", theirs, mine)
+        return Integration.new("fast_forwarded", none)
+      end
+
+      sout = IO::Memory.new
+      status = Process.run("git", ["-c", "core.quotepath=off", "merge-tree", "--write-tree", "--name-only", "--no-messages", mine, theirs],
+        output: sout, error: Process::Redirect::Close, chdir: cwd, env: {"GIT_TERMINAL_PROMPT" => "0"})
+      lines = sout.to_s.lines.reject(&.empty?)
+      raise Error.new("merge-tree failed") if lines.empty? || status.exit_code > 1
+      tree = lines.first
+      conflicts = lines[1..].uniq
+      unless conflicts.empty?
+        return Integration.new("conflict", conflicts) unless resolve
+        side = resolve == "theirs" ? theirs : mine
+        info = String.build do |io|
+          conflicts.each do |path|
+            entry = run(["ls-tree", "-z", side, "--", path], cwd: cwd).rstrip('\0')
+            if entry.empty?
+              io << "0 " << "0" * 40 << '\t' << path << '\n'
+            else
+              meta, _ = entry.split('\t', 2)
+              mode, _, sha = meta.split(' ')
+              io << mode << ' ' << sha << '\t' << path << '\n'
+            end
+          end
+        end
+        tree = with_index(cwd, tree, info)
+      end
+      merge = commit_tree(cwd, tree, [mine, theirs], "Merge #{default} into #{branch}", author_name, author_email)
+      update_ref(cwd, "refs/heads/#{branch}", merge, mine)
+      Integration.new("merged", conflicts)
+    end
+
+    private def ancestor?(cwd : String, a : String, b : String) : Bool
+      run_status(["merge-base", "--is-ancestor", a, b], cwd: cwd) == 0
+    end
+
+    record Changed, status : String, path : String
+
+    # What publish would send: commits ahead, and each file's net change.
+    def unpublished(repo_id : Int64, branch : String, default : String) : {Int32, Array(Changed)}
+      return {0, [] of Changed} unless branch_exists?(repo_id, branch) && branch_exists?(repo_id, default)
+      cwd = mirror_path(repo_id)
+      ahead = run(["rev-list", "--count", "#{default}..#{branch}"], cwd: cwd).strip.to_i
+      return {0, [] of Changed} if ahead == 0
+      out = run(["-c", "core.quotepath=off", "diff", "--name-status", "--no-renames", "#{default}...#{branch}"], cwd: cwd)
+      {ahead, out.lines.compact_map { |l|
+        st, path = l.split('\t', 2)
+        path ? Changed.new(st, path) : nil
+      }}
+    end
+
+    def advance_default(repo_id : Int64, default : String, sha : String) : Nil
+      run(["update-ref", "refs/heads/#{default}", sha], cwd: mirror_path(repo_id))
     end
 
     def read_file(repo_id : Int64, ref : String, path : String) : String
@@ -189,9 +324,12 @@ module MdEditor
     # content = nil deletes the file (base_blob is then required: you can only
     # delete the version you saw). Either way it's one more commit — history
     # keeps the old content, so a delete is recoverable via restore.
+    # autosave: a run of typing is one version, not one commit per pause. If
+    # the branch tip is an unpublished autosave of this same file from the
+    # last few minutes, the new commit replaces it (the reflog still has it).
     def commit_file(repo_id : Int64, branch : String, base_ref : String, path : String,
                     content : String?, base_blob : String?, message : String,
-                    author_name : String, author_email : String) : String
+                    author_name : String, author_email : String, autosave_of : String? = nil) : String
       cwd = mirror_path(repo_id)
 
       parent = run(["rev-parse", "--verify", "refs/heads/#{branch}"], cwd: cwd).strip rescue nil
@@ -215,7 +353,8 @@ module MdEditor
 
       blob = content ? write_blob(cwd, content) : nil
       tree = build_tree(cwd, parent, path, blob)
-      commit = commit_tree(cwd, tree, parent, message, author_name, author_email)
+      base = autosave_of && autosave_base(repo_id, cwd, parent, message, author_name, autosave_of)
+      commit = commit_tree(cwd, tree, [base || parent], message, author_name, author_email)
       # Compare-and-swap on the ref: if another save moved the branch since
       # we read `parent` — or created it, when it didn't exist yet (old value
       # "" = must not exist) — update-ref fails and nothing is overwritten.
@@ -226,6 +365,86 @@ module MdEditor
         raise Conflict.new("branch moved during save; reload and retry")
       end
       blob || ""
+    end
+
+    AUTOSAVE_WINDOW = 10.minutes
+
+    # The parent to commit onto when `tip` can be folded away, else nil.
+    private def autosave_base(repo_id : Int64, cwd : String, tip : String, message : String,
+                              author : String, default : String) : String?
+      return nil unless branch_exists?(repo_id, default)
+      fields = run(["log", "-1", "--format=%P%x1f%an%x1f%ct%x1f%s", tip], cwd: cwd).strip.split(0x1f.chr)
+      return nil unless fields.size == 4
+      parents, who, at, subject = fields
+      return nil unless subject == message && who == author && !parents.empty? && !parents.includes?(' ')
+      return nil if Time.utc.to_unix - at.to_i64 > AUTOSAVE_WINDOW.total_seconds
+      return nil if ancestor?(cwd, tip, default) # already published
+      parents
+    end
+
+    # Commit an uploaded file. Never overwrites: a taken name gets -2, -3…
+    # Returns the path it landed on.
+    def commit_asset(repo_id : Int64, branch : String, base_ref : String, path : String, data : Bytes,
+                     message : String, author_name : String, author_email : String) : String
+      cwd = mirror_path(repo_id)
+      parent = branch_exists?(repo_id, branch) ? run_head_sha(repo_id, branch) : run(["rev-parse", "--verify", base_ref], cwd: cwd).strip
+      target = path
+      n = 1
+      while run_status(["cat-file", "-e", "#{parent}:#{target}"], cwd: cwd) == 0
+        n += 1
+        ext = File.extname(path)
+        target = "#{path[0...(path.size - ext.size)]}-#{n}#{ext}"
+      end
+      sout = IO::Memory.new
+      serr = IO::Memory.new
+      st = Process.run("git", ["hash-object", "-w", "--stdin"], input: IO::Memory.new(data), output: sout, error: serr, chdir: cwd)
+      raise Error.new(serr.to_s) unless st.success?
+      tree = build_tree(cwd, parent, target, sout.to_s.strip)
+      commit = commit_tree(cwd, tree, [parent], message, author_name, author_email)
+      begin
+        update_ref(cwd, "refs/heads/#{branch}", commit, branch_exists?(repo_id, branch) ? parent : "")
+      rescue e : Error
+        raise Conflict.new("branch moved during upload; retry")
+      end
+      target
+    end
+
+    # Rename a post. A page bundle (dir/index.md) moves its whole folder, so
+    # colocated images keep working. CAS on the blob the client last saw.
+    def move_file(repo_id : Int64, branch : String, base_ref : String, from : String, to : String,
+                  base_blob : String, message : String, author_name : String, author_email : String) : Nil
+      cwd = mirror_path(repo_id)
+      parent = branch_exists?(repo_id, branch) ? run_head_sha(repo_id, branch) : run(["rev-parse", "--verify", base_ref], cwd: cwd).strip
+      current = run_status(["rev-parse", "--verify", "--quiet", "#{parent}:#{from}"], cwd: cwd) == 0 ? run(["rev-parse", "#{parent}:#{from}"], cwd: cwd).strip : nil
+      raise Conflict.new("changed on server: expected #{base_blob}, found #{current}") if current != base_blob
+      raise Conflict.new("#{to} already exists") if run_status(["cat-file", "-e", "#{parent}:#{to}"], cwd: cwd) == 0
+
+      bundle = File.basename(from) == "index.md" && File.basename(to) == "index.md"
+      pairs = [] of {String, String}
+      if bundle
+        from_dir, to_dir = File.dirname(from), File.dirname(to)
+        raise Conflict.new("#{to_dir} already exists") if run_status(["cat-file", "-e", "#{parent}:#{to_dir}"], cwd: cwd) == 0
+        run(["ls-tree", "-r", "-z", "--name-only", parent, "--", "#{from_dir}/"], cwd: cwd).split('\0', remove_empty: true).each do |p|
+          pairs << {p, "#{to_dir}/#{p[(from_dir.size + 1)..]}"}
+        end
+      else
+        pairs << {from, to}
+      end
+      info = String.build do |io|
+        pairs.each do |(a, b)|
+          meta, _ = run(["ls-tree", "-z", parent, "--", a], cwd: cwd).rstrip('\0').split('\t', 2)
+          mode, _, sha = meta.split(' ')
+          io << "0 " << "0" * 40 << '\t' << a << '\n'
+          io << mode << ' ' << sha << '\t' << b << '\n'
+        end
+      end
+      tree = with_index(cwd, run(["rev-parse", "#{parent}^{tree}"], cwd: cwd).strip, info)
+      commit = commit_tree(cwd, tree, [parent], message, author_name, author_email)
+      begin
+        update_ref(cwd, "refs/heads/#{branch}", commit, branch_exists?(repo_id, branch) ? parent : "")
+      rescue e : Error
+        raise Conflict.new("branch moved during rename; retry")
+      end
     end
 
     # Per-path history. Returns array of {sha, author, email, time, subject}.
@@ -293,7 +512,20 @@ module MdEditor
       end
     end
 
-    private def commit_tree(cwd : String, tree : String, parent : String, message : String,
+    # A new tree: `base` with `info` (update-index --index-info lines) applied.
+    private def with_index(cwd : String, base : String, info : String) : String
+      index = File.tempname("md_editor_index")
+      begin
+        env = {"GIT_INDEX_FILE" => index}
+        run(["read-tree", base], cwd: cwd, env: env)
+        run(["update-index", "--index-info"], cwd: cwd, env: env, stdin: info)
+        run(["write-tree"], cwd: cwd, env: env).strip
+      ensure
+        File.delete(index) if File.exists?(index)
+      end
+    end
+
+    private def commit_tree(cwd : String, tree : String, parents : Array(String), message : String,
                             author_name : String, author_email : String) : String
       env = {
         "GIT_AUTHOR_NAME"     => author_name,
@@ -301,7 +533,7 @@ module MdEditor
         "GIT_COMMITTER_NAME"  => author_name,
         "GIT_COMMITTER_EMAIL" => author_email,
       }
-      run(["commit-tree", tree, "-p", parent, "-m", message], cwd: cwd, env: env).strip
+      run(["commit-tree", tree] + parents.flat_map { |p| ["-p", p] } + ["-m", message], cwd: cwd, env: env).strip
     end
 
     private def update_ref(cwd : String, ref : String, new : String, old : String) : Nil
