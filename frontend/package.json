@@ -19,12 +19,19 @@
     "dompurify": "^3.4.17",
     "marked": "^18.1.1",
     "marked-footnote": "^1.4.0",
+    "nlcst-to-string": "^4.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.30.6",
+    "retext-english": "^5.0.0",
+    "retext-intensify": "^7.0.0",
+    "retext-passive": "^5.0.0",
+    "retext-simplify": "^8.0.0",
     "smol-toml": "^1.9.1",
     "styletron-engine-monolithic": "^1.0.0",
-    "styletron-react": "^6.1.1"
+    "styletron-react": "^6.1.1",
+    "unified": "^11.0.5",
+    "unist-util-visit": "^5.2.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

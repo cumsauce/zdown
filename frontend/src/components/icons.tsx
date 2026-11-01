@@ -31,6 +31,7 @@ const paths: Record<string, React.ReactNode> = {
   puzzle: <path d="M8 3.5a1.8 1.8 0 0 1 3.6 0v1.3H16v4.4h-1.3a1.8 1.8 0 0 0 0 3.6H16v4.4H4v-4.4h1.3a1.8 1.8 0 0 0 0-3.6H4V4.8h4z" />,
   table: <><rect x="2.8" y="3.8" width="14.4" height="12.4" rx="1.6" /><path d="M2.8 8.2h14.4M2.8 12.2h14.4M8.2 8.2v8" /></>,
   rule: <path d="M3 10h14" />,
+  review: <path d="M3 5.5h14M3 10h7M3 14.5h5.5M12 14.2l2.2 2.3 3.8-4.7" />,
   note: <path d="M5 2.8h7l3.2 3.2V17H5zM12 2.8V6h3.2M7.5 9.5h5M7.5 12.5h5" />,
   history: <path d="M3.3 10a6.7 6.7 0 1 0 2-4.7L3.3 7.3M3.3 3.5v3.8h3.8M10 6.5V10l2.5 1.5" />,
   trash: <path d="M3.5 5.5h13M8 5.5V3.8h4v1.7M5 5.5l.8 11h8.4l.8-11M8.3 8.5v5M11.7 8.5v5" />,

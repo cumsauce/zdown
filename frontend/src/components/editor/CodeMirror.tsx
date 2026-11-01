@@ -9,6 +9,8 @@ import { classHighlighter } from '@lezer/highlight';
 import type { RenderCtx } from '../../lib/render';
 import { cycleHeading, insertBlock, insertLink, linePrefix, nestList, toggleWrap } from './commands';
 import { livePreview, setRenderCtx, setShowMarks } from './live';
+import { applyFix, issuesAt, reviewField, ReviewEngine, setActive, setHidden, visibleIssues } from './review';
+import type { Issue, IssueKind, ReviewSummary } from './reviewTypes';
 
 export interface EditorHandle {
   toggleWrap(marker: string): void;
@@ -27,6 +29,13 @@ export interface EditorHandle {
   redo(): void;
   /** drop focus — closes the on-screen keyboard */
   blur(): void;
+  /** review mode */
+  rectOf(issue: Issue): { top: number; bottom: number; left: number } | null;
+  stepIssue(delta: number): void;
+  fix(issue: Issue, replacement: string): void;
+  ignore(issue: Issue): void;
+  restoreIgnored(): void;
+  clearActive(): void;
 }
 
 interface Props {
@@ -38,18 +47,25 @@ interface Props {
   /** image files pasted or dropped into the text */
   onFiles(files: File[]): void;
   placeholderText?: string;
+  review: boolean;
+  reviewHidden: Set<IssueKind>;
+  onReviewSummary(s: ReviewSummary): void;
+  /** the issues under a tap or step; empty closes the note */
+  onIssues(issues: Issue[]): void;
 }
 
 const isImage = (f: File) => f.type.startsWith('image/');
 
 export const CodeMirror = memo(forwardRef<EditorHandle, Props>(function CodeMirror(
-  { value, onChange, ctx, showMarks, onSave, onFiles, placeholderText }, ref,
+  { value, onChange, ctx, showMarks, onSave, onFiles, placeholderText, review, reviewHidden, onReviewSummary, onIssues }, ref,
 ) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const emitted = useRef(value); // what we last told the parent: no need to diff it back
-  const cb = useRef({ onChange, onSave, onFiles });
-  cb.current = { onChange, onSave, onFiles };
+  const cb = useRef({ onChange, onSave, onFiles, onReviewSummary, onIssues });
+  cb.current = { onChange, onSave, onFiles, onReviewSummary, onIssues };
+  const engine = useRef<ReviewEngine | null>(null);
+  const touch = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     if (!host.current) return;
@@ -83,7 +99,34 @@ export const CodeMirror = memo(forwardRef<EditorHandle, Props>(function CodeMirr
             indentWithTab,
           ]),
           livePreview,
+          reviewField,
           EditorView.domEventHandlers({
+            click(e) {
+              if (!engine.current || !v.state.selection.main.empty) return false;
+              const at = v.posAtCoords({ x: e.clientX, y: e.clientY });
+              const found = at === null || !(e.target as HTMLElement).closest('.rv') ? [] : issuesAt(v.state, at);
+              v.dispatch({ effects: setActive.of(found[0] ?? null) });
+              cb.current.onIssues(found);
+              return false;
+            },
+            touchstart(e) {
+              touch.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+              return false;
+            },
+            // Reading through notes on a phone shouldn't keep throwing the keyboard up.
+            touchend(e) {
+              const t = e.changedTouches[0];
+              const start = touch.current;
+              if (!engine.current || v.hasFocus || !start || Math.hypot(t.clientX - start.x, t.clientY - start.y) > 8) return false;
+              if (!(e.target as HTMLElement).closest('.rv')) return false;
+              const at = v.posAtCoords({ x: t.clientX, y: t.clientY });
+              const found = at === null ? [] : issuesAt(v.state, at);
+              if (!found.length) return false;
+              e.preventDefault();
+              v.dispatch({ effects: setActive.of(found[0]) });
+              cb.current.onIssues(found);
+              return true;
+            },
             paste(e) {
               const files = [...(e.clipboardData?.files ?? [])].filter(isImage);
               if (files.length) { e.preventDefault(); cb.current.onFiles(files); return true; }
@@ -111,6 +154,7 @@ export const CodeMirror = memo(forwardRef<EditorHandle, Props>(function CodeMirr
             if (u.docChanged) {
               emitted.current = u.state.doc.toString();
               cb.current.onChange(emitted.current);
+              engine.current?.schedule();
             }
           }),
         ],
@@ -121,6 +165,15 @@ export const CodeMirror = memo(forwardRef<EditorHandle, Props>(function CodeMirr
     // the editor is created once; value/props flow in through the effects below
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    const v = view.current;
+    if (!v || !review) return undefined;
+    const e = new ReviewEngine(v, (s) => cb.current.onReviewSummary(s));
+    engine.current = e;
+    return () => { e.destroy(); engine.current = null; };
+  }, [review]);
+  useEffect(() => { view.current?.dispatch({ effects: setHidden.of(reviewHidden) }); }, [reviewHidden]);
 
   useEffect(() => { view.current?.dispatch({ effects: setRenderCtx.of(ctx) }); }, [ctx]);
   useEffect(() => { view.current?.dispatch({ effects: setShowMarks.of(showMarks) }); }, [showMarks]);
@@ -176,6 +229,30 @@ export const CodeMirror = memo(forwardRef<EditorHandle, Props>(function CodeMirr
     undo() { if (view.current) { undo(view.current); view.current.focus(); } },
     redo() { if (view.current) { redo(view.current); view.current.focus(); } },
     blur() { view.current?.contentDOM.blur(); },
+    rectOf(issue) {
+      const live = view.current?.state.field(reviewField).issues.find((i) => i.kind === issue.kind && i.text === issue.text) ?? issue;
+      return view.current?.coordsAtPos(live.from) ?? null;
+    },
+    stepIssue(delta) {
+      const v = view.current;
+      if (!v) return;
+      const list = visibleIssues(v.state);
+      if (!list.length) return;
+      const { active } = v.state.field(reviewField);
+      const here = active ? list.findIndex((i) => i.from === active.from && i.kind === active.kind) : -1;
+      const next = list[here < 0 ? (delta > 0 ? 0 : list.length - 1) : (here + delta + list.length) % list.length];
+      v.dispatch({ effects: [setActive.of(next), EditorView.scrollIntoView(next.from, { y: 'center' })] });
+      cb.current.onIssues([next]);
+    },
+    fix(issue, replacement) {
+      const v = view.current;
+      if (!v) return;
+      applyFix(v, issue, replacement);
+      engine.current?.schedule(0);
+    },
+    ignore(issue) { engine.current?.ignore(issue); },
+    restoreIgnored() { engine.current?.restoreIgnored(); },
+    clearActive() { view.current?.dispatch({ effects: setActive.of(null) }); },
   }), []);
 
   return <div ref={host} className="cm-host" />;

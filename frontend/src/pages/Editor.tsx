@@ -5,6 +5,8 @@ import { api, ApiError, errorMessage } from '../api';
 import { CodeMirror, type EditorHandle } from '../components/editor/CodeMirror';
 import { InsertSheet } from '../components/editor/InsertSheet';
 import { PostSettings } from '../components/editor/PostSettings';
+import { ReviewBar, ReviewCard } from '../components/editor/ReviewBar';
+import type { Issue, IssueKind, ReviewSummary } from '../components/editor/reviewTypes';
 import { Toolbar } from '../components/editor/Toolbar';
 import { Icon } from '../components/icons';
 import { ConflictBox, PublishSheet } from '../components/Publish';
@@ -255,6 +257,11 @@ function Editor() {
   const [publishing, setPublishing] = useState(false);
   const [uploading, setUploading] = useState(0);
   const [focused, setFocused] = useState(false);
+  const [review, setReview] = useState(() => { try { return localStorage.getItem('zdown.review') === '1'; } catch { return false; } });
+  const [reviewSummary, setReviewSummary] = useState<ReviewSummary | null>(null);
+  const [reviewHidden, setReviewHidden] = useState<Set<IssueKind>>(() => new Set());
+  const [note, setNote] = useState<Issue[]>([]);
+  const scroller = useRef<HTMLDivElement>(null);
 
   const editor = useRef<EditorHandle>(null);
   const titleRef = useRef<HTMLTextAreaElement>(null);
@@ -431,6 +438,7 @@ function Editor() {
   }, [dirty, conflict, save]);
 
   const onBody = useCallback((b: string) => {
+    setNote([]);
     userEdited.current = true;
     setContent((c) => splitDoc(c).head + b);
   }, []);
@@ -573,6 +581,16 @@ function Editor() {
     }
   }, [repoId]);
 
+  // ---------- review ----------
+  const toggleReview = () => {
+    const on = !review;
+    setReview(on);
+    setNote([]);
+    if (!on) setReviewSummary(null);
+    try { localStorage.setItem('zdown.review', on ? '1' : '0'); } catch { /* storage blocked */ }
+  };
+  const closeNote = useCallback(() => { setNote([]); editor.current?.clearActive(); }, []);
+
   // ---------- derived ----------
   const words = useMemo(() => wordCount(doc.body), [doc.body]);
   useEffect(() => { if (!loading && !loadError && path) recents.touch(repoId, path, titleValue || null); }, [repoId, path, loading, loadError]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -659,6 +677,7 @@ function Editor() {
         <SaveState aria-live="polite">{stateNode}</SaveState>
         <IconBtn icon={tab === 'write' ? 'eye' : 'pen'} label={tab === 'write' ? 'Preview' : 'Edit'} aria-pressed={tab === 'preview'}
           onClick={() => setTab(tab === 'write' ? 'preview' : 'write')} />
+        <IconBtn icon="review" label="Review writing" aria-pressed={review} on={review} onClick={toggleReview} />
         <IconBtn icon="sliders" label="Post details" aria-expanded={panel} on={panel} onClick={() => setPanel(!panel)} />
         <Menu items={menu} trigger={(t) => <IconBtn {...t} icon="more" label="More" />} />
         {repo && !local && (siteState.data?.status.ahead ?? 0) > 0 && (
@@ -687,7 +706,7 @@ function Editor() {
       )}
 
       <Body>
-        <Scroller style={{ display: tab === 'write' ? undefined : 'none' }}
+        <Scroller ref={scroller} style={{ display: tab === 'write' ? undefined : 'none' }}
           onMouseDown={(e) => {
             // the empty space under the text belongs to the text
             if (e.target === e.currentTarget || (e.target as HTMLElement).dataset.column !== undefined) {
@@ -729,7 +748,8 @@ function Editor() {
               {badFrontMatter && <MetaBtn onClick={() => setPanel(true)}><Badge $tone="negative">Front matter has an error</Badge> Fix it</MetaBtn>}
             </MetaLine>
             <CodeMirror ref={editor} value={doc.body} onChange={onBody} ctx={ctx} showMarks={marks}
-              onSave={() => void save(true)} onFiles={(f) => void uploadFiles(f)} />
+              onSave={() => void save(true)} onFiles={(f) => void uploadFiles(f)}
+              review={review} reviewHidden={reviewHidden} onReviewSummary={setReviewSummary} onIssues={setNote} />
           </Column>
         </Scroller>
         {tab === 'preview' && (
@@ -747,8 +767,23 @@ function Editor() {
             <PostSettings content={content} path={path || null} isSection={isSection} onChange={edit} onRename={rename} canRename={!!baseBlob} />
           </Side>
         )}
+        {review && tab === 'write' && note.length > 0 && (
+          <ReviewCard issues={note} editor={editor} scroller={scroller} onClose={closeNote}
+            onFix={(i, r) => { setNote([]); editor.current?.fix(i, r); }}
+            onIgnore={(i) => { setNote([]); editor.current?.ignore(i); }} />
+        )}
       </Body>
 
+      {review && tab === 'write' && !panel && !keyboard && (
+        <ReviewBar summary={reviewSummary} hidden={reviewHidden}
+          onToggle={(k) => {
+            setNote([]);
+            setReviewHidden((h) => { const n = new Set(h); if (n.has(k)) n.delete(k); else n.add(k); return n; });
+          }}
+          onStep={(d) => editor.current?.stepIssue(d)}
+          onRestore={() => editor.current?.restoreIgnored()}
+          onClose={toggleReview} />
+      )}
       {tab === 'write' && !panel && (
         <Toolbar editor={editor} words={words} keyboard={keyboard} onInsert={() => setInsert(true)}
           onImage={() => fileInput.current?.click()} />

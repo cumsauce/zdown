@@ -33,6 +33,7 @@
   --hover: #f2efe7; --active: #e9e5da;
   --selection: #f6d8cc;
   --shadow: 0 1px 2px rgba(40,32,20,.06), 0 12px 32px rgba(40,32,20,.14);
+  --rv-hard: #f8eec6; --rv-hard-dot: #d9b43a; --rv-veryhard: #f8dcd2; --rv-veryhard-dot: #d9694a; --rv-simpler: #2f6fa8; --rv-passive: #2f7a46; --rv-weak: #8a5fb0;
   --code-kw: #a3341a; --code-str: #2f7a46; --code-num: #8a5a00; --code-com: #958f83; --code-fn: #1f5f8b; --code-type: #6b4c9a;
 }
 @media (prefers-color-scheme: dark) {
@@ -47,6 +48,7 @@
     --hover: #24221d; --active: #2e2b25;
     --selection: #5c2f20;
     --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 32px rgba(0,0,0,.5);
+    --rv-hard: #3b3214; --rv-hard-dot: #d9b43a; --rv-veryhard: #4a2418; --rv-veryhard-dot: #e8815f; --rv-simpler: #84bbe0; --rv-passive: #7cc492; --rv-weak: #bda7e6;
     --code-kw: #f2907a; --code-str: #9ccf8f; --code-num: #e3bd6d; --code-com: #77716a; --code-fn: #84bbe0; --code-type: #bda7e6;
   }
 }
@@ -62,7 +64,8 @@
   --hover: #24221d; --active: #2e2b25;
   --selection: #5c2f20;
   --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 32px rgba(0,0,0,.5);
-  --code-kw: #f2907a; --code-str: #9ccf8f; --code-num: #e3bd6d; --code-com: #77716a; --code-fn: #84bbe0; --code-type: #bda7e6;
+  --rv-hard: #3b3214; --rv-hard-dot: #d9b43a; --rv-veryhard: #4a2418; --rv-veryhard-dot: #e8815f; --rv-simpler: #84bbe0; --rv-passive: #7cc492; --rv-weak: #bda7e6;
+    --code-kw: #f2907a; --code-str: #9ccf8f; --code-num: #e3bd6d; --code-com: #77716a; --code-fn: #84bbe0; --code-type: #bda7e6;
 }
 :root[data-theme="light"] { color-scheme: light; }
 
@@ -241,6 +244,16 @@ html.editing, html.editing body { overflow: hidden; overscroll-behavior: none; h
   .prose, .cm-host .cm-content, .md-block.prose { font-size: 18px; }
   .prose pre code, .md-codeblock { font-size: 13px; }
 }
+
+/* ---- review mode: a wash for sentences, a dotted underline for words ---- */
+.rv { cursor: pointer; }
+.rv-hard { background: var(--rv-hard); }
+.rv-veryhard { background: var(--rv-veryhard); }
+.rv-simpler, .rv-passive, .rv-weak { text-decoration-line: underline; text-decoration-style: dotted; text-decoration-thickness: 2px; text-underline-offset: 4px; }
+.rv-simpler { text-decoration-color: var(--rv-simpler); }
+.rv-passive { text-decoration-color: var(--rv-passive); }
+.rv-weak { text-decoration-color: var(--rv-weak); }
+.rv-active { box-shadow: 0 2px 0 var(--fg-muted); }
 
 /* ---- unified diff ---- */
 .diff { font-family: var(--mono); font-size: 12.5px; line-height: 1.55; overflow-x: auto; }

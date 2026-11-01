@@ -21,6 +21,9 @@ phone.
   merged into your working branch; real conflicts ask you to choose.
 - Image upload (file picker, paste, drag) committed beside the post or in
   `static/`. Large phone photos are scaled down first.
+- Optional review mode: reading grade, hard sentences, simpler wording, passive
+  voice and weak words highlighted in place, with one-tap fixes. Runs in the
+  browser and never edits anything by itself. English only.
 - Autosave with local drafts as a safety net; a run of typing is one version in
   the history, not one commit per pause.
 - Local "scratchpads": write without any remote, connect one later.

@@ -27,6 +27,16 @@ manuscript, not a dashboard.
 - **Primitives** live in `components/ui.tsx` (`Btn`, `Input`, `Sheet`, `Menu`, …).
   Menus and modals become bottom sheets on phones.
 
+## Review mode
+
+Off by default, and only ever highlights: a wash for hard sentences, a dotted
+underline for words. A note explains one thing, offers the fix if there is a safe
+one, and never takes focus, so reading notes on a phone doesn't raise the keyboard.
+Analysis runs in a worker, cached per paragraph (`review.worker.ts`). Rules that
+nag get turned off: a false alarm costs more than a missed hint. Only text reaches
+it: code, URLs and components are blanked at their original offsets
+(`extractProse`).
+
 ## How the editor renders
 
 `components/editor/live.ts` builds decorations from the Lezer markdown tree, so

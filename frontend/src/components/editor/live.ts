@@ -215,7 +215,7 @@ function parseDoc(state: EditorState): Parsed {
   return { shortcodes: findShortcodes(text, code), code, templated: false };
 }
 
-const parsed = StateField.define<Parsed>({
+export const parsedField = StateField.define<Parsed>({
   create: parseDoc,
   update(v, tr) {
     return tr.docChanged || tr.effects.some((e) => e.is(setRenderCtx)) || syntaxTree(tr.state) !== syntaxTree(tr.startState) ? parseDoc(tr.state) : v;
@@ -228,7 +228,7 @@ const MARK_NAMES = new Set(['EmphasisMark', 'StrikethroughMark', 'CodeMark']);
 function build(state: EditorState): { deco: DecorationSet; atomic: DecorationSet } {
   const { doc } = state;
   const { ctx, showMarks, focused } = state.field(options);
-  const { shortcodes, templated } = state.field(parsed);
+  const { shortcodes, templated } = state.field(parsedField);
   const tree = ensureSyntaxTree(state, doc.length, 40) ?? syntaxTree(state);
   const sel = focused ? state.selection.ranges : [];
   const touches = (from: number, to: number) => sel.some((r) => r.from <= to && r.to >= from);
@@ -550,7 +550,7 @@ function build(state: EditorState): { deco: DecorationSet; atomic: DecorationSet
   }
 
   // ---- footnotes (not part of the GFM grammar) ----
-  const codeSkip = state.field(parsed).code;
+  const codeSkip = state.field(parsedField).code;
   const text = doc.toString();
   for (const m of text.matchAll(/\[\^[^\]\s]+\](:)?/g)) {
     const from = m.index;
@@ -584,7 +584,7 @@ const live = StateField.define<{ deco: DecorationSet; atomic: DecorationSet }>({
 
 export const livePreview = [
   options,
-  parsed,
+  parsedField,
   live,
   EditorView.focusChangeEffect.of((_state, focusing) => setFocused.of(focusing)),
 ];

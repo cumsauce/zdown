@@ -303,6 +303,26 @@ Footnote here[^1].
 
 [^1]: The footnote text.
 EOF
+cat > content/blog/wordy.md <<'EOF'
++++
+title = "A wordy draft"
+date = 2020-02-02
++++
+
+We need to utilize the tools. The window was broken by someone. This is really a fine day.
+
+The multifaceted organizational considerations surrounding interdepartmental communication methodologies fundamentally necessitate comprehensive reevaluation throughout institutional hierarchies everywhere.
+
+Check `utilize` in code and [the utilize link](https://example.com/utilize) here. A short plain line.
+
+```
+we utilize this in a code block
+```
+
+{{ note_free(text="utilize") }}
+
+- We should utilize lists too.
+EOF
 cat > content/blog/next-year.md <<'EOF'
 +++
 title = "Scheduled for the future"
